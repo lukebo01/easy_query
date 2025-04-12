@@ -5,6 +5,8 @@ import 'package:easy_query/services/big_query_service.dart';
 import 'package:easy_query/pages/search_page.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:flutter_app_icons/flutter_app_icons.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 
 Future<String> fetchGeminiApiKey() async {
   final response = await http.get(
@@ -20,6 +22,10 @@ Future<String> fetchGeminiApiKey() async {
 }
 
 void main() async {
+  final _flutterAppIconsPlugin = FlutterAppIcons();
+  final iconPath =
+      kReleaseMode ? 'assets/assets/favicon.png' : 'assets/favicon.png';
+  await _flutterAppIconsPlugin.setIcon(icon: iconPath);
   // Initialize services
   WidgetsFlutterBinding.ensureInitialized();
 

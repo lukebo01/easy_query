@@ -15,6 +15,7 @@ dependencies:
   googleapis_auth: ^2.0.0
   googleapis: ^14.0.0
   fl_chart: ^0.70.2
+  flutter_app_icons: ^0.1.1
 
 dev_dependencies:
   flutter_test:
@@ -26,4 +27,5 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
+    - assets/favicon.png
 
