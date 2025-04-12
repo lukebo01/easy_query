@@ -31,19 +31,12 @@ Per configurare e avviare l'applicazione, segui questi passaggi:
      cd easy_query
      ```
 
-2. **Aggiungi il file API key**:
-     - Crea un file chiamato `api_key_gemini.txt`.
-     - Inserisci la tua chiave API di Gemini Flash 2.0 all'interno del file.
-     - Posiziona il file nella directory `assets` del progetto.
-
-     ⚠️ **Nota**: Senza il file `api_key_gemini.txt`, l'applicazione non funzionerà.
-
-3. **Installa le dipendenze**:
+2. **Installa le dipendenze**:
      ```bash
      flutter pub get
      ```
 
-4. **Esegui l'app**:
+3. **Esegui l'app**:
      ```bash
      flutter run
      ```
@@ -52,7 +45,6 @@ Per configurare e avviare l'applicazione, segui questi passaggi:
 
 - **Flutter**: Assicurati di avere Flutter installato. Segui la guida ufficiale [qui](https://docs.flutter.dev/get-started/install).
 - **Google Cloud**: Configura un progetto Google Cloud con BigQuery e Cloud Storage abilitati.
-- **Chiave API Gemini Flash 2.0**: Richiedi una chiave API per utilizzare il modello LLM.
 
 ## Architettura
 
