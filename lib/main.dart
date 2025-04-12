@@ -3,13 +3,29 @@ import 'package:easy_query/services/rest_service.dart';
 import 'package:easy_query/services/gemini_flash_service.dart';
 import 'package:easy_query/services/big_query_service.dart';
 import 'package:easy_query/pages/search_page.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+Future<String> fetchGeminiApiKey() async {
+  final response = await http.get(
+    Uri.parse('https://get-gemini-api-key.lucaborrelli-work.workers.dev'),
+  );
+
+  if (response.statusCode == 200) {
+    final data = json.decode(response.body);
+    return data['apiKey'];
+  } else {
+    throw Exception('Failed to load Gemini API key');
+  }
+}
 
 void main() async {
   // Initialize services
+  WidgetsFlutterBinding.ensureInitialized();
+
   final restService = RestService();
-  WidgetsFlutterBinding.ensureInitialized(); // Necessario per usare rootBundle
-  String apiKeyGemini = await rootBundle.loadString('api_key_gemini.txt');
+  final apiKeyGemini = await fetchGeminiApiKey();
+
   print('API Gemini Key: $apiKeyGemini');
   final geminiService = GeminiFlashService(
     restService: restService,
