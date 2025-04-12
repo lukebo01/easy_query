@@ -38,13 +38,23 @@ Per configurare e avviare l'applicazione, segui questi passaggi:
 
 3. **Esegui l'app**:
      ```bash
-     flutter run
+     flutter run web
      ```
+
+## Release Mode Web
+Per eseguire l'app in modalità web, è necessario avere Python installato sul proprio PC. Assicurati di avere `http.server` disponibile. Posizionati nella cartella `build/web` e utilizza il seguente comando per avviare un server locale:
+
+```bash
+python3 -m http.server 8080
+```
+
+Questo comando avvierà un server HTTP sulla porta 8080, consentendo di accedere all'app tramite il browser.
 
 ## Requisiti
 
 - **Flutter**: Assicurati di avere Flutter installato. Segui la guida ufficiale [qui](https://docs.flutter.dev/get-started/install).
 - **Google Cloud**: Configura un progetto Google Cloud con BigQuery e Cloud Storage abilitati.
+- **Python**: Assicurati di avere Python 3.7 o superiore installato. Puoi scaricarlo dal sito ufficiale [qui](https://www.python.org/downloads/).
 
 ## Architettura
 
