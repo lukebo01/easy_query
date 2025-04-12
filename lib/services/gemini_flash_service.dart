@@ -32,7 +32,6 @@ class GeminiFlashService {
       'generationConfig': {'temperature': 0.2, 'topP': 0.8, 'topK': 40},
     };
 
-    // NOTA: endpoint aggiornato alla versione v1beta e al modello gemini-1.5-flash
     final response = await _restService.post(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
       payload,
