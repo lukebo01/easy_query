@@ -9,12 +9,12 @@ class ResultPage extends StatefulWidget {
   final String analysis;
 
   const ResultPage({
-    Key? key,
+    super.key,
     required this.question,
     required this.sqlQuery,
     required this.results,
     required this.analysis,
-  }) : super(key: key);
+  });
 
   @override
   State<ResultPage> createState() => _ResultPageState();

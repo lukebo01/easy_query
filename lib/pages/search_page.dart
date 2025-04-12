@@ -8,10 +8,10 @@ class SearchPage extends StatefulWidget {
   final BigQueryService bigQueryService;
 
   const SearchPage({
-    Key? key,
+    super.key,
     required this.geminiService,
     required this.bigQueryService,
-  }) : super(key: key);
+  });
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -69,7 +69,7 @@ class _SearchPageState extends State<SearchPage> {
         question,
         databaseSchema,
       );
-      print('$sqlQuery');
+      print(sqlQuery);
 
       // Esempio: logica commentata
       /*

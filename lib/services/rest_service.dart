@@ -9,7 +9,7 @@ class RestService {
   Future<dynamic> post(String endpoint, Map<String, dynamic> data) async {
     try {
       final response = await http.post(
-        Uri.parse('$endpoint'),
+        Uri.parse(endpoint),
         headers: _headers,
         body: jsonEncode(data),
       );
@@ -26,10 +26,7 @@ class RestService {
 
   Future<dynamic> get(String endpoint) async {
     try {
-      final response = await http.get(
-        Uri.parse('$endpoint'),
-        headers: _headers,
-      );
+      final response = await http.get(Uri.parse(endpoint), headers: _headers);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return jsonDecode(response.body);

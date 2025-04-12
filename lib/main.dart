@@ -36,10 +36,10 @@ Future<String> fetchServiceJson() async {
 }
 
 void main() async {
-  final _flutterAppIconsPlugin = FlutterAppIcons();
+  final flutterAppIconsPlugin = FlutterAppIcons();
   final iconPath =
       kReleaseMode ? 'assets/assets/favicon.png' : 'assets/favicon.png';
-  await _flutterAppIconsPlugin.setIcon(icon: iconPath);
+  await flutterAppIconsPlugin.setIcon(icon: iconPath);
   // Initialize services
   WidgetsFlutterBinding.ensureInitialized();
 
