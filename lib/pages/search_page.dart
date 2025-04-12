@@ -23,6 +23,14 @@ class _SearchPageState extends State<SearchPage> {
   String _errorMessage = '';
 
   @override
+  void initState() {
+    super.initState();
+    _questionController.addListener(() {
+      setState(() {}); // Update the UI when the text field changes
+    });
+  }
+
+  @override
   void dispose() {
     _questionController.dispose();
     super.dispose();
@@ -110,16 +118,10 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Scaffold senza AppBar, usiamo un background con gradiente per un tocco moderno
+    // Scaffold senza AppBar, usiamo un background con tinta unita
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Colors.black, Colors.blue.shade50],
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-          ),
-        ),
+        color: const Color.fromARGB(255, 20, 20, 20), // Background color
         child: SafeArea(
           child: Center(
             child: SingleChildScrollView(
@@ -128,104 +130,110 @@ class _SearchPageState extends State<SearchPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   // Logo centrale
-                  const Text(
-                    'Welcome to',
-                    style: TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.w600,
-                      fontStyle: FontStyle.italic,
-                      color: Colors.white,
-                      fontFamily:
-                          'Serif', // Use a sophisticated font family if available
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
                   const SizedBox(height: 16),
                   SizedBox(
                     height: 300,
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(56), // Bordi rotondi
                       child: Image.asset(
-                        'assets/favicon.png',
+                        'assets/eq_logo.png',
                         fit: BoxFit.contain,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 24),
-                  const SizedBox(height: 16),
-                  // Sottotitolo
                   const Text(
-                    'Ask a question about your data',
-                    style: TextStyle(fontSize: 18),
+                    'Ask any question about your data',
+                    style: TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      fontFamily:
+                          'Serif', // Use a sophisticated font family if available
+                    ),
                     textAlign: TextAlign.center,
                   ),
+                  const SizedBox(height: 24),
+                  const SizedBox(height: 16),
                   const SizedBox(height: 32),
                   // Box in stile "card" per l'input
                   Card(
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    color: Colors.black87,
+                    color: const Color.fromARGB(221, 10, 10, 10),
                     elevation: 6,
                     child: Padding(
                       padding: const EdgeInsets.all(12),
-                      child: TextField(
-                        controller: _questionController,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          hintText:
-                              'e.g. "What were the top 5 selling products last month?"',
-                          hintStyle: TextStyle(color: Colors.grey[400]),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            borderSide: BorderSide.none,
-                          ),
-                          prefixIcon: const Icon(
-                            Icons.search,
-                            color: Colors.white70,
-                          ),
-                          fillColor: Colors.grey[850],
-                          filled: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                            vertical: 16,
-                            horizontal: 20,
-                          ),
-                        ),
-                        maxLines: 3,
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: (_) => _processQuestion(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  // Bottone
-                  ElevatedButton(
-                    onPressed: _isLoading ? null : _processQuestion,
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 16,
-                        horizontal: 32,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      backgroundColor: Colors.black,
-                      foregroundColor: Colors.white,
-                      elevation: 8,
-                      shadowColor: Colors.grey.shade800,
-                    ),
-                    child:
-                        _isLoading
-                            ? const CircularProgressIndicator(
-                              color: Colors.white,
-                            )
-                            : const Text(
-                              'Search',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
+                      child: Column(
+                        children: [
+                          TextField(
+                            controller: _questionController,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: InputDecoration(
+                              hintText:
+                                  'e.g. "What were the top 5 selling products last month?"',
+                              hintStyle: TextStyle(color: Colors.grey[400]),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: BorderSide.none,
+                              ),
+                              prefixIcon: const Icon(
+                                Icons.search,
+                                color: Colors.white70,
+                              ),
+                              fillColor: Colors.grey[850],
+                              filled: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                vertical: 16,
+                                horizontal: 20,
                               ),
                             ),
+                            maxLines: 3,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) => _processQuestion(),
+                          ),
+                          const SizedBox(height: 12),
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: ElevatedButton(
+                              onPressed:
+                                  _isLoading ||
+                                          _questionController.text
+                                              .trim()
+                                              .isEmpty
+                                      ? null
+                                      : _processQuestion,
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                  horizontal: 24,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                backgroundColor:
+                                    _questionController.text.trim().isEmpty
+                                        ? Colors.grey
+                                        : Colors.white,
+                                foregroundColor: Colors.black,
+                                elevation: 8,
+                                shadowColor: Colors.white,
+                              ),
+                              child:
+                                  _isLoading
+                                      ? const CircularProgressIndicator(
+                                        color: Colors.white,
+                                      )
+                                      : const Icon(
+                                        Icons.send,
+                                        size: 20,
+                                        color: Colors.black, // Always visible
+                                      ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   // Error box
