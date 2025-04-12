@@ -17,6 +17,7 @@ class BigQueryService {
       ]);
       _bigQueryApi = BigqueryApi(client);
       _isInitialized = true;
+      print('BigQuery service initialized successfully');
     } catch (e) {
       throw Exception('Failed to initialize BigQuery: $e');
     }

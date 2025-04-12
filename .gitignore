@@ -45,4 +45,5 @@ app.*.map.json
 /android/app/release
 
 
-assets/api_key_gemini.txt
+.env
+soy-transducer-456512-t0-a4f086e34f71.json

@@ -1,0 +1,8 @@
+{
+	"name": "get-service-api-key",
+	"main": "src/index.js",
+	"compatibility_date": "2025-04-12",
+	"observability": {
+		"enabled": true,
+	},
+}

@@ -21,6 +21,20 @@ Future<String> fetchGeminiApiKey() async {
   }
 }
 
+// fetchServiceJson
+Future<String> fetchServiceJson() async {
+  final response = await http.get(
+    Uri.parse('https://get-service-api-key.lucaborrelli-work.workers.dev'),
+  );
+
+  if (response.statusCode == 200) {
+    final data = json.decode(response.body);
+    return data['apiKey'];
+  } else {
+    throw Exception('Failed to load service JSON');
+  }
+}
+
 void main() async {
   final _flutterAppIconsPlugin = FlutterAppIcons();
   final iconPath =
@@ -38,11 +52,31 @@ void main() async {
     apiKey: apiKeyGemini, // Replace with actual API key
   );
 
-  final bigQueryService = BigQueryService(projectId: 'YOUR_GCP_PROJECT_ID');
+  /// Recupera il JSON del Service Account dal relativo endpoint
+  final serviceAccountJson = await fetchServiceJson();
 
-  // For demo purposes, we're not initializing BigQuery with credentials
-  // In a real app, you would load credentials from a secure source
-  // await bigQueryService.initialize(credentialsJson);
+  // Parsifica il JSON in Map (per verificare che il formato sia corretto)
+  final Map<String, dynamic> serviceAccountMap = jsonDecode(serviceAccountJson);
+  final String privateKey = serviceAccountMap['private_key'];
+  print("Lunghezza della private_key: ${privateKey.length}");
+
+  print('Service Account Map: $serviceAccountMap');
+
+  // Se il campo 'private_key' contiene sequenze "\n" letterali, le converto in newline reali
+  if (serviceAccountMap['private_key'] is String) {
+    serviceAccountMap['private_key'] = (serviceAccountMap['private_key']
+            as String)
+        .replaceAllMapped(RegExp(r'\\n'), (match) => '\n');
+  }
+  final String credentialsJson = jsonEncode(serviceAccountMap);
+
+  String projectId = serviceAccountMap['project_id'] ?? 'your-project-id';
+
+  print('==================================================================');
+
+  // Inizializza il servizio BigQuery con le credenziali ottenute
+  final bigQueryService = BigQueryService(projectId: projectId);
+  await bigQueryService.initialize(credentialsJson);
 
   runApp(MyApp(geminiService: geminiService, bigQueryService: bigQueryService));
 }
