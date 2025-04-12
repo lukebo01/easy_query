@@ -23,7 +23,11 @@ class GeminiFlashService {
                   'based on the provided schema.\n'
                   'Question: $userQuestion\n'
                   'Database Schema: $databaseSchema\n'
-                  'Generate only the SQL query without any explanations.',
+                  'Table name: soy-transducer-456512-t0.Base_Dataset.sales_prova\n' //TODO: passare il nome COMPLETO della tabella
+                  'Use the following guidelines:\n'
+                  '1. Generate only the SQL query without any explanations.\n'
+                  '2. Use backticks (`) around column names with spaces to avoid errors (even in aggregating operations eg., SELECT AVG(`gross income`)) \n'
+                  '3. Always use the `LIMIT` clause to limit the number of rows returned to 100.\n',
             },
           ],
         },

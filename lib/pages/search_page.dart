@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:easy_query/services/gemini_flash_service.dart';
 import 'package:easy_query/services/big_query_service.dart';
-// import 'package:easy_query/pages/result_page.dart'; // se vorrai riattivare la parte dei risultati
+import 'package:easy_query/pages/result_page.dart'; // se vorrai riattivare la parte dei risultati
 
 class SearchPage extends StatefulWidget {
   final GeminiFlashService geminiService;
@@ -52,7 +52,14 @@ class _SearchPageState extends State<SearchPage> {
 
     try {
       // Schema di esempio
-      const databaseSchema = '''
+      final databaseSchema = await widget.bigQueryService.getDatasetSchema(
+        'Base_Dataset', // Nome del dataset
+        'sales_prova', // Nome della tabella
+      );
+
+      print(databaseSchema);
+
+      /*'''
       {
         "tables": [
           {
@@ -70,19 +77,29 @@ class _SearchPageState extends State<SearchPage> {
           }
         ]
       }
-      ''';
+      ''';*/
 
       // Genera query SQL
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
         databaseSchema,
       );
-      print(sqlQuery);
+
+      final cleanedSqlQuery =
+          sqlQuery
+              .replaceAll('sql', ' ') // Rimuove caratteri indesiderati
+              .replaceAll(RegExp(r'\s+'), ' ') // Rimuove spazi multipli
+              .replaceAll(RegExp(r'\n'), ' ') // Rimuove newline
+              .replaceAll('```', '') // Rimuove virgolette triple
+              .trim(); // Rimuove spazi iniziali e finali
+
+      print('Generated query: $cleanedSqlQuery');
 
       // Esempio: logica commentata
-      /*
-      final results = await widget.bigQueryService.executeQuery(sqlQuery);
-      print('Generated SQL Query: $sqlQuery');
+
+      final results = await widget.bigQueryService.executeQuery(
+        cleanedSqlQuery,
+      );
       print('Query Results: $results');
 
       final analysis = await widget.geminiService.analyzeQueryResults(
@@ -94,15 +111,15 @@ class _SearchPageState extends State<SearchPage> {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => ResultPage(
-            question: question,
-            sqlQuery: sqlQuery,
-            results: results,
-            analysis: analysis,
-          ),
+          builder:
+              (context) => ResultPage(
+                question: question,
+                sqlQuery: sqlQuery,
+                results: results,
+                analysis: analysis,
+              ),
         ),
       );
-      */
     } catch (e) {
       setState(() {
         _errorMessage = 'Error: ${e.toString()}';

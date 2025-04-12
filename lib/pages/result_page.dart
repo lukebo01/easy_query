@@ -69,7 +69,12 @@ class _ResultPageState extends State<ResultPage>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Query Results'),
-        backgroundColor: Theme.of(context).colorScheme.primary,
+        backgroundColor: const Color.fromARGB(
+          255,
+          20,
+          20,
+          20,
+        ), // Consistent background color
         foregroundColor: Colors.white,
         bottom: TabBar(
           controller: _tabController,
@@ -83,16 +88,29 @@ class _ResultPageState extends State<ResultPage>
           indicatorColor: Colors.white,
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildDataTab(), _buildChartsTab(), _buildAnalysisTab()],
+      body: Container(
+        color: const Color.fromARGB(
+          255,
+          20,
+          20,
+          20,
+        ), // Consistent background color
+        child: TabBarView(
+          controller: _tabController,
+          children: [_buildDataTab(), _buildChartsTab(), _buildAnalysisTab()],
+        ),
       ),
     );
   }
 
   Widget _buildDataTab() {
     if (widget.results.isEmpty) {
-      return const Center(child: Text('No data found for this query'));
+      return const Center(
+        child: Text(
+          'No data found for this query',
+          style: TextStyle(color: Colors.white), // Consistent text color
+        ),
+      );
     }
 
     // Get column names from first result
@@ -105,24 +123,36 @@ class _ResultPageState extends State<ResultPage>
         children: [
           Text(
             'Question: ${widget.question}',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: Colors.white, // Consistent text color
+            ),
           ),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.grey[200],
+              color: Colors.grey[850], // Consistent card color
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
               'SQL: ${widget.sqlQuery}',
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                color: Colors.white, // Consistent text color
+              ),
             ),
           ),
           const SizedBox(height: 16),
           Text(
             'Results (${widget.results.length} rows):',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: Colors.white, // Consistent text color
+            ),
           ),
           const SizedBox(height: 8),
           SingleChildScrollView(
@@ -134,7 +164,10 @@ class _ResultPageState extends State<ResultPage>
                         (name) => DataColumn(
                           label: Text(
                             name,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white, // Consistent text color
+                            ),
                           ),
                         ),
                       )
@@ -146,8 +179,16 @@ class _ResultPageState extends State<ResultPage>
                           cells:
                               columnNames
                                   .map(
-                                    (col) =>
-                                        DataCell(Text(row[col].toString())),
+                                    (col) => DataCell(
+                                      Text(
+                                        row[col].toString(),
+                                        style: const TextStyle(
+                                          color:
+                                              Colors
+                                                  .white, // Consistent text color
+                                        ),
+                                      ),
+                                    ),
                                   )
                                   .toList(),
                         ),
@@ -162,7 +203,12 @@ class _ResultPageState extends State<ResultPage>
 
   Widget _buildChartsTab() {
     if (widget.results.isEmpty) {
-      return const Center(child: Text('No data available for charts'));
+      return const Center(
+        child: Text(
+          'No data available for charts',
+          style: TextStyle(color: Colors.white), // Consistent text color
+        ),
+      );
     }
 
     final columnNames = widget.results.first.keys.toList();
@@ -173,6 +219,7 @@ class _ResultPageState extends State<ResultPage>
         children: [
           // Chart type and axis selection
           Card(
+            color: Colors.grey[850], // Consistent card color
             child: Padding(
               padding: const EdgeInsets.all(12.0),
               child: Column(
@@ -180,7 +227,11 @@ class _ResultPageState extends State<ResultPage>
                 children: [
                   const Text(
                     'Chart Configuration',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: Colors.white, // Consistent text color
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Row(
@@ -271,6 +322,7 @@ class _ResultPageState extends State<ResultPage>
           // Chart display
           Expanded(
             child: Card(
+              color: Colors.grey[850], // Consistent card color
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: _buildChart(),
@@ -329,10 +381,19 @@ class _ResultPageState extends State<ResultPage>
         children: [
           const Text(
             'Analysis',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 20,
+              color: Colors.white, // Consistent text color
+            ),
           ),
           const SizedBox(height: 16),
-          Text(widget.analysis),
+          Text(
+            widget.analysis,
+            style: const TextStyle(
+              color: Colors.white,
+            ), // Consistent text color
+          ),
         ],
       ),
     );
