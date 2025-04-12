@@ -46,4 +46,4 @@ app.*.map.json
 
 
 .env
-soy-transducer-456512-t0-a4f086e34f71.json
+service_account.json
