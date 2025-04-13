@@ -12,6 +12,7 @@ class GeminiFlashService {
   Future<String> generateSqlQuery(
     String userQuestion,
     String databaseSchema,
+    String tableName,
   ) async {
     final payload = {
       'contents': [
@@ -23,11 +24,15 @@ class GeminiFlashService {
                   'based on the provided schema.\n'
                   'Question: $userQuestion\n'
                   'Database Schema: $databaseSchema\n'
-                  'Table name: soy-transducer-456512-t0.Base_Dataset.sales_prova\n' //TODO: passare il nome COMPLETO della tabella
+                  'Table name: $tableName\n' //Passare il nome COMPLETO della tabella
                   'Use the following guidelines:\n'
                   '1. Generate only the SQL query without any explanations.\n'
                   '2. Use backticks (`) around column names with spaces to avoid errors (even in aggregating operations eg., SELECT AVG(`gross income`)) \n'
-                  '3. Always use the `LIMIT` clause to limit the number of rows returned to 100.\n',
+                  '3. Always use the `LIMIT` clause to limit the number of rows returned to 100.\n'
+                  '4. Use `SELECT *` only when necessary.\n' // New
+                  '5. Use `JOIN` only when necessary.\n' // New
+                  '6. Never use DELETE, INSERT, or UPDATE statements.\n' // New
+                  '7. If the user requested information about a column that does not exist, find the most similar column name in the schema and use it instead.\n', // New
             },
           ],
         },

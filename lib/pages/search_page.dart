@@ -51,13 +51,30 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      // Schema di esempio
-      final databaseSchema = await widget.bigQueryService.getDatasetSchema(
-        'Base_Dataset', // Nome del dataset
-        'sales_prova', // Nome della tabella
+      // Recupera il nome del progetto
+      final projectId = widget.bigQueryService.projectId;
+
+      // Recupera la lista dei dataset
+      final datasets = await widget.bigQueryService.getDatasets();
+
+      print('List of datasets: $datasets');
+
+      // Recupera la lista delle tabelle
+      final tables = await widget.bigQueryService.getTables(
+        // PER ORA UTILIZZIAMO UN SOLO DATASE
+        datasets[0], // Nome del dataset
       );
 
-      print(databaseSchema);
+      print('List of tables: $tables');
+
+      // Recupera lo schema delle tabelle
+      final schema = await widget.bigQueryService.getTableSchema(
+        // PER ORA UTILIZZIAMO UNA SOLA TABELLA
+        datasets[0], // Nome del dataset
+        tables[0], // Nome della tabella
+      );
+
+      print(schema);
 
       /*'''
       {
@@ -82,7 +99,8 @@ class _SearchPageState extends State<SearchPage> {
       // Genera query SQL
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
-        databaseSchema,
+        schema,
+        '$projectId.${datasets[0]}.${tables[0]}', // Nome COMPLETO della tabella
       );
 
       final cleanedSqlQuery =

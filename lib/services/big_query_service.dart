@@ -64,7 +64,40 @@ class BigQueryService {
     }
   }
 
-  Future<String> getDatasetSchema(String datasetId, String tableId) async {
+  // Method to get the list of datasets in the project
+  Future<List<String>> getDatasets() async {
+    if (!_isInitialized) {
+      throw Exception('BigQuery service not initialized');
+    }
+
+    try {
+      final datasets = await _bigQueryApi.datasets.list(projectId);
+      return datasets.datasets!
+          .map((dataset) => dataset.datasetReference!.datasetId!)
+          .toList();
+    } catch (e) {
+      throw Exception('Failed to get datasets: $e');
+    }
+  }
+
+  // Method to get the list of tables in a dataset
+  Future<List<String>> getTables(String datasetId) async {
+    if (!_isInitialized) {
+      throw Exception('BigQuery service not initialized');
+    }
+
+    try {
+      final tables = await _bigQueryApi.tables.list(projectId, datasetId);
+      return tables.tables!
+          .map((table) => table.tableReference!.tableId!)
+          .toList();
+    } catch (e) {
+      throw Exception('Failed to get tables: $e');
+    }
+  }
+
+  // Method to get the schema of a table
+  Future<String> getTableSchema(String datasetId, String tableId) async {
     if (!_isInitialized) {
       throw Exception('BigQuery service not initialized');
     }
