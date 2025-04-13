@@ -240,15 +240,25 @@ class _ResultPageState extends State<ResultPage>
                         child: DropdownButtonFormField<String>(
                           decoration: const InputDecoration(
                             labelText: 'Chart Type',
+                            labelStyle: TextStyle(
+                              color: Colors.white,
+                            ), // White text
                             border: OutlineInputBorder(),
                           ),
+                          dropdownColor:
+                              Colors.grey[850], // Consistent dropdown color
                           value: _selectedChartType,
                           items:
                               ['Bar', 'Line', 'Pie']
                                   .map(
                                     (type) => DropdownMenuItem<String>(
                                       value: type,
-                                      child: Text(type),
+                                      child: Text(
+                                        type,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ), // White text
+                                      ),
                                     ),
                                   )
                                   .toList(),
@@ -268,15 +278,25 @@ class _ResultPageState extends State<ResultPage>
                         child: DropdownButtonFormField<String>(
                           decoration: const InputDecoration(
                             labelText: 'X Axis',
+                            labelStyle: TextStyle(
+                              color: Colors.white,
+                            ), // White text
                             border: OutlineInputBorder(),
                           ),
+                          dropdownColor:
+                              Colors.grey[850], // Consistent dropdown color
                           value: _selectedXAxis,
                           items:
                               columnNames
                                   .map(
                                     (col) => DropdownMenuItem<String>(
                                       value: col,
-                                      child: Text(col),
+                                      child: Text(
+                                        col,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ), // White text
+                                      ),
                                     ),
                                   )
                                   .toList(),
@@ -292,15 +312,25 @@ class _ResultPageState extends State<ResultPage>
                         child: DropdownButtonFormField<String>(
                           decoration: const InputDecoration(
                             labelText: 'Y Axis',
+                            labelStyle: TextStyle(
+                              color: Colors.white,
+                            ), // White text
                             border: OutlineInputBorder(),
                           ),
+                          dropdownColor:
+                              Colors.grey[850], // Consistent dropdown color
                           value: _selectedYAxis,
                           items:
                               columnNames
                                   .map(
                                     (col) => DropdownMenuItem<String>(
                                       value: col,
-                                      child: Text(col),
+                                      child: Text(
+                                        col,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ), // White text
+                                      ),
                                     ),
                                   )
                                   .toList(),

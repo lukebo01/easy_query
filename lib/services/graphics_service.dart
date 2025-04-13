@@ -32,8 +32,13 @@ class GraphicsService {
             color: Colors.blue,
             width: 16,
             borderRadius: BorderRadius.circular(4),
+            backDrawRodData: BackgroundBarChartRodData(
+              show: true,
+              color: Colors.transparent,
+            ),
           ),
         ],
+        showingTooltipIndicators: [0],
       ),
     );
 
@@ -41,7 +46,16 @@ class GraphicsService {
       barGroups: barGroups,
       titlesData: FlTitlesData(
         leftTitles: AxisTitles(
-          sideTitles: SideTitles(showTitles: true, reservedSize: 40),
+          sideTitles: SideTitles(
+            showTitles: true,
+            reservedSize: 40,
+            getTitlesWidget: (value, _) {
+              return Text(
+                value.toString(),
+                style: const TextStyle(color: Colors.white), // White text
+              );
+            },
+          ),
         ),
         bottomTitles: AxisTitles(
           sideTitles: SideTitles(
@@ -54,7 +68,10 @@ class GraphicsService {
                   padding: const EdgeInsets.only(top: 8.0),
                   child: Text(
                     label.length > 10 ? '${label.substring(0, 7)}...' : label,
-                    style: const TextStyle(fontSize: 10),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.white,
+                    ), // White text
                   ),
                 );
               }
@@ -104,7 +121,16 @@ class GraphicsService {
       ],
       titlesData: FlTitlesData(
         leftTitles: AxisTitles(
-          sideTitles: SideTitles(showTitles: true, reservedSize: 40),
+          sideTitles: SideTitles(
+            showTitles: true,
+            reservedSize: 40,
+            getTitlesWidget: (value, _) {
+              return Text(
+                value.toString(),
+                style: const TextStyle(color: Colors.white), // White text
+              );
+            },
+          ),
         ),
         bottomTitles: AxisTitles(
           sideTitles: SideTitles(
@@ -118,7 +144,10 @@ class GraphicsService {
                   padding: const EdgeInsets.only(top: 8.0),
                   child: Text(
                     label.length > 10 ? '${label.substring(0, 7)}...' : label,
-                    style: const TextStyle(fontSize: 10),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.white,
+                    ), // White text
                   ),
                 );
               }
