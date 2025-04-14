@@ -418,14 +418,46 @@ class _ResultPageState extends State<ResultPage>
             ),
           ),
           const SizedBox(height: 16),
-          Text(
-            widget.analysis,
-            style: const TextStyle(
-              color: Colors.white,
-            ), // Consistent text color
-          ),
+          ..._formatAnalysisText(widget.analysis),
         ],
       ),
     );
+  }
+
+  List<Widget> _formatAnalysisText(String analysis) {
+    final lines = analysis.split('\n');
+    return lines.map((line) {
+      if (line.startsWith('**') && line.endsWith('**')) {
+        return Text(
+          line.replaceAll('**', ''),
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+            color: Colors.white,
+          ),
+        );
+      } else if (line.startsWith('* ')) {
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '• ',
+              style: TextStyle(color: Colors.white),
+            ),
+            Expanded(
+              child: Text(
+                line.substring(2),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        );
+      } else {
+        return Text(
+          line,
+          style: const TextStyle(color: Colors.white),
+        );
+      }
+    }).toList();
   }
 }
