@@ -61,46 +61,34 @@ class _SearchPageState extends State<SearchPage> {
 
       // Recupera la lista delle tabelle
       final tables = await widget.bigQueryService.getTables(
-        // PER ORA UTILIZZIAMO UN SOLO DATASE
+        // PER ORA UTILIZZIAMO UN SOLO DATASET
         datasets[0], // Nome del dataset
       );
 
       print('List of tables: $tables');
 
       // Recupera lo schema delle tabelle
-      final schema = await widget.bigQueryService.getTableSchema(
-        // PER ORA UTILIZZIAMO UNA SOLA TABELLA
-        datasets[0], // Nome del dataset
-        tables[0], // Nome della tabella
-      );
+      List schemas = [];
 
-      print(schema);
-
-      /*'''
-      {
-        "tables": [
-          {
-            "name": "sales",
-            "columns": [
-              {"name": "date", "type": "DATE"},
-              {"name": "product_id", "type": "STRING"},
-              {"name": "product_name", "type": "STRING"},
-              {"name": "category", "type": "STRING"},
-              {"name": "quantity", "type": "INTEGER"},
-              {"name": "price", "type": "FLOAT"},
-              {"name": "total", "type": "FLOAT"},
-              {"name": "region", "type": "STRING"}
-            ]
-          }
-        ]
+      for (var table in tables) {
+        schemas.add(await widget.bigQueryService.getTableSchema(
+          datasets[0], // Nome del dataset
+          table, // Nome della tabella
+        ));
       }
-      ''';*/
+
+      print(schemas);
+
+      // Prendi i nomi completi di tutte le tabelle
+      final tableNames = tables.map((table) => '$projectId.${datasets[0]}.$table').toList();
+
+
 
       // Genera query SQL
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
-        schema,
-        '$projectId.${datasets[0]}.${tables[0]}', // Nome COMPLETO della tabella
+        schemas.toString(), // Elenco degli schemas
+        tableNames.toString(), // Elenco dei nomi delle tabelle
       );
 
       final cleanedSqlQuery =
