@@ -53,145 +53,165 @@ class _SearchPageState extends State<SearchPage> {
 
   // Modifiche al metodo _processQuestion
 
-Future<void> _processQuestion(String question) async {
-  if (question.trim().isEmpty) {
-    setState(() {
-      _errorMessage = 'Please enter a question';
-    });
-    return;
-  }
-
-  setState(() {
-    _isLoading = true;
-    _errorMessage = '';
-    _currentExecutingQuery = null; // Clear previous query if any
-  });
-
-  try {
-    // Recupera il nome del progetto
-    final projectId = widget.bigQueryService.projectId;
-
-    // Recupera la lista dei dataset
-    final datasets = await widget.bigQueryService.getDatasets();
-
-    log('List of datasets: $datasets');
-    if (datasets.isEmpty) {
-      throw Exception("No datasets found in the project. Cannot proceed.");
-    }
-
-    final targetDataset = datasets[0];
-    final tables = await widget.bigQueryService.getTables(targetDataset);
-
-    log('List of tables in $targetDataset: $tables');
-    
-    // Recupera lo schema delle tabelle
-    List schemas = [];
-    List<String> tableNames = []; // Store fully qualified names here
-    Map<String, List<Map<String, dynamic>>> sampleData = {};
-
-    for (var table in tables) {
-      try {
-        final schema = await widget.bigQueryService.getTableSchema(
-          targetDataset, // Nome del dataset
-          table, // Nome della tabella
-        );
-        schemas.add(schema);
-        
-        // Formato nome tabella completo
-        final fullTableName = '$projectId.$targetDataset.$table';
-        tableNames.add(fullTableName);
-
-        print('Schema for table $fullTableName: ${jsonEncode(schema).toString()}');
-        
-        // Ottieni un campione di dati da ogni tabella (limitato a 5 record)
-        try {
-          final sampleQuery = "SELECT * FROM `$fullTableName` LIMIT 15";
-          final tableSample = await widget.bigQueryService.executeQuery(sampleQuery);
-          sampleData[fullTableName] = tableSample;
-        } catch (e) {
-          log('Warning: Failed to get sample data from $fullTableName. Error: $e');
-        }
-      } catch (e) {
-        log('Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e');
-      }
-    }
-
-    log('Table schemas fetched: ${schemas.length}');
-    log('Sample data fetched from ${sampleData.length} tables');
-    
-    // Analisi del contesto per identificare tabelle rilevanti
-    final contextAnalysis = await widget.geminiService.analyzeQueryContext(
-      question,
-      jsonEncode(schemas),
-      tableNames,
-      sampleData,
-    );
-    
-    log('Context analysis: ${jsonEncode(contextAnalysis)}');
-
-    // Genera query SQL con contesto arricchito
-    final sqlQuery = await widget.geminiService.generateSqlQuery(
-      question,
-      jsonEncode(schemas),
-      jsonEncode(tableNames),
-      sampleData: sampleData,
-      contextAnalysis: contextAnalysis,
-    );
-
-    final cleanedSqlQuery =
-        sqlQuery
-            .replaceAll('sql', ' ')
-            .replaceAll(RegExp(r'\s+'), ' ')
-            .replaceAll(RegExp(r'\n'), ' ')
-            .replaceAll('```', '')
-            .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT')
-            .trim();
-
-    log('Executing SQL query: $cleanedSqlQuery');
-
-    // Set the query string to display the banner
-    setState(() {
-      _currentExecutingQuery = cleanedSqlQuery;
-    });
-
-    final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
-    log('Query Results: ${jsonEncode(results)}');
-
-    final analysis = await widget.geminiService.analyzeQueryResults(
-      cleanedSqlQuery,
-      results,
-    );
-
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ResultPage(
-          question: question,
-          sqlQuery: cleanedSqlQuery,
-          results: results,
-          analysis: analysis,
-        ),
-      ),
-    );
-  } catch (e) {
-    log('Error processing question: ${e.toString()}', error: e);
-    setState(() {
-      if (e is Exception) {
-        _errorMessage = e.toString().replaceFirst('Exception: ', '');
-      } else {
-        _errorMessage = 'An unexpected error occurred: ${e.toString()}';
-      }
-    });
-  } finally {
-    if (mounted) {
+  Future<void> _processQuestion(String question) async {
+    if (question.trim().isEmpty) {
       setState(() {
-        _isLoading = false;
-        _currentExecutingQuery = null;
+        _errorMessage = 'Please enter a question';
       });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = '';
+      _currentExecutingQuery = 'Translating request to english...';
+    });
+
+    try {
+      // Recupera il nome del progetto
+      final projectId = widget.bigQueryService.projectId;
+
+      // Recupera la lista dei dataset
+      final datasets = await widget.bigQueryService.getDatasets();
+
+      log('List of datasets: $datasets');
+      if (datasets.isEmpty) {
+        throw Exception("No datasets found in the project. Cannot proceed.");
+      }
+
+      final targetDataset = datasets[0];
+      final tables = await widget.bigQueryService.getTables(targetDataset);
+
+      log('List of tables in $targetDataset: $tables');
+
+      // Recupera lo schema delle tabelle
+      List schemas = [];
+      List<String> tableNames = []; // Store fully qualified names here
+      Map<String, List<Map<String, dynamic>>> sampleData = {};
+
+      for (var table in tables) {
+        try {
+          final schema = await widget.bigQueryService.getTableSchema(
+            targetDataset, // Nome del dataset
+            table, // Nome della tabella
+          );
+          schemas.add(schema);
+
+          // Formato nome tabella completo
+          final fullTableName = '$projectId.$targetDataset.$table';
+          tableNames.add(fullTableName);
+
+          print(
+            'Schema for table $fullTableName: ${jsonEncode(schema).toString()}',
+          );
+
+          // Ottieni un campione di dati da ogni tabella (limitato a 15 record casuali)
+          try {
+            final sampleQuery =
+                "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
+            final tableSample = await widget.bigQueryService.executeQuery(
+              sampleQuery,
+            );
+            sampleData[fullTableName] = tableSample;
+          } catch (e) {
+            log(
+              'Warning: Failed to get sample data from $fullTableName. Error: $e',
+            );
+          }
+        } catch (e) {
+          log(
+            'Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e',
+          );
+        }
+      }
+
+      log('Table schemas fetched: ${schemas.length}');
+      log('Sample data fetched from ${sampleData.length} tables');
+
+      // Analisi del contesto per identificare tabelle rilevanti
+      setState(() {
+        _currentExecutingQuery = 'Analyzing dataset context...';
+      });
+
+      final contextAnalysis = await widget.geminiService.analyzeQueryContext(
+        question,
+        jsonEncode(schemas),
+        tableNames,
+        sampleData,
+      );
+
+      log('Context analysis: ${jsonEncode(contextAnalysis)}');
+
+      // Genera query SQL con contesto arricchito
+      setState(() {
+        _currentExecutingQuery = 'Building optimized query...';
+      });
+
+      final sqlQuery = await widget.geminiService.generateSqlQuery(
+        question,
+        jsonEncode(schemas),
+        jsonEncode(tableNames),
+        sampleData: sampleData,
+        contextAnalysis: contextAnalysis,
+      );
+
+      final cleanedSqlQuery =
+          sqlQuery
+              .replaceAll('sql', ' ')
+              .replaceAll(RegExp(r'\s+'), ' ')
+              .replaceAll(RegExp(r'\n'), ' ')
+              .replaceAll('```', '')
+              .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT')
+              .trim();
+
+      log('Executing SQL query: $cleanedSqlQuery');
+
+      // Set the query string to display the banner
+      setState(() {
+        _currentExecutingQuery = cleanedSqlQuery;
+      });
+
+      final results = await widget.bigQueryService.executeQuery(
+        cleanedSqlQuery,
+      );
+      log('Query Results: ${jsonEncode(results)}');
+
+      final analysis = await widget.geminiService.analyzeQueryResults(
+        cleanedSqlQuery,
+        results,
+      );
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder:
+              (context) => ResultPage(
+                question: question,
+                sqlQuery: cleanedSqlQuery,
+                results: results,
+                analysis: analysis,
+              ),
+        ),
+      );
+    } catch (e) {
+      log('Error processing question: ${e.toString()}', error: e);
+      setState(() {
+        if (e is Exception) {
+          _errorMessage = e.toString().replaceFirst('Exception: ', '');
+        } else {
+          _errorMessage = 'An unexpected error occurred: ${e.toString()}';
+        }
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _currentExecutingQuery = null;
+        });
+      }
     }
   }
-}
 
   // --- CSV Upload Methods ---
 
@@ -701,7 +721,10 @@ Future<void> _processQuestion(String question) async {
                               maxLines: 3,
                               minLines: 1,
                               textInputAction: TextInputAction.done,
-                              onSubmitted: (_) => _processQuestion(_questionController.text),
+                              onSubmitted:
+                                  (_) => _processQuestion(
+                                    _questionController.text,
+                                  ),
                             ),
                             const SizedBox(height: 12),
                             // --- Row for Buttons ---
@@ -724,12 +747,14 @@ Future<void> _processQuestion(String question) async {
                                 // Send Button (existing - style is already good)
                                 ElevatedButton(
                                   onPressed:
-                                    _isLoading ||
-                                            _questionController.text
-                                                .trim()
-                                                .isEmpty
-                                        ? null
-                                        : () => _processQuestion(_questionController.text),
+                                      _isLoading ||
+                                              _questionController.text
+                                                  .trim()
+                                                  .isEmpty
+                                          ? null
+                                          : () => _processQuestion(
+                                            _questionController.text,
+                                          ),
                                   style: ElevatedButton.styleFrom(
                                     padding: const EdgeInsets.symmetric(
                                       vertical: 12,
@@ -817,7 +842,7 @@ Future<void> _processQuestion(String question) async {
                             const SizedBox(width: 8),
                             Expanded(
                               child: SelectableText(
-                                'Executing query: $_currentExecutingQuery',
+                                'Now processing: $_currentExecutingQuery',
                                 style: TextStyle(
                                   color: Colors.green.shade100,
                                 ), // Lighter green text
@@ -884,12 +909,7 @@ Future<void> _processQuestion(String question) async {
                   const SizedBox(height: 16), // Space at the bottom
                   Text(
                     'This open-source project was developed for the Big Data exam by Luca Borrelli and Davide Mariani.',
-                    style: TextStyle(
-                      color: Colors.grey.shade500,
-                      fontSize: 12,
-                      fontStyle: FontStyle.italic,
-                    ),
-                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
                   ),
                 ],
               ),
