@@ -51,144 +51,147 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
-  Future<void> _processQuestion() async {
-    final question = _questionController.text.trim();
-    if (question.isEmpty) {
-      setState(() {
-        _errorMessage = 'Please enter a question';
-      });
-      return;
+  // Modifiche al metodo _processQuestion
+
+Future<void> _processQuestion(String question) async {
+  if (question.trim().isEmpty) {
+    setState(() {
+      _errorMessage = 'Please enter a question';
+    });
+    return;
+  }
+
+  setState(() {
+    _isLoading = true;
+    _errorMessage = '';
+    _currentExecutingQuery = null; // Clear previous query if any
+  });
+
+  try {
+    // Recupera il nome del progetto
+    final projectId = widget.bigQueryService.projectId;
+
+    // Recupera la lista dei dataset
+    final datasets = await widget.bigQueryService.getDatasets();
+
+    log('List of datasets: $datasets');
+    if (datasets.isEmpty) {
+      throw Exception("No datasets found in the project. Cannot proceed.");
     }
 
+    final targetDataset = datasets[0];
+    final tables = await widget.bigQueryService.getTables(targetDataset);
+
+    log('List of tables in $targetDataset: $tables');
+    
+    // Recupera lo schema delle tabelle
+    List schemas = [];
+    List<String> tableNames = []; // Store fully qualified names here
+    Map<String, List<Map<String, dynamic>>> sampleData = {};
+
+    for (var table in tables) {
+      try {
+        final schema = await widget.bigQueryService.getTableSchema(
+          targetDataset, // Nome del dataset
+          table, // Nome della tabella
+        );
+        schemas.add(schema);
+        
+        // Formato nome tabella completo
+        final fullTableName = '$projectId.$targetDataset.$table';
+        tableNames.add(fullTableName);
+
+        print('Schema for table $fullTableName: ${jsonEncode(schema).toString()}');
+        
+        // Ottieni un campione di dati da ogni tabella (limitato a 5 record)
+        try {
+          final sampleQuery = "SELECT * FROM `$fullTableName` LIMIT 15";
+          final tableSample = await widget.bigQueryService.executeQuery(sampleQuery);
+          sampleData[fullTableName] = tableSample;
+        } catch (e) {
+          log('Warning: Failed to get sample data from $fullTableName. Error: $e');
+        }
+      } catch (e) {
+        log('Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e');
+      }
+    }
+
+    log('Table schemas fetched: ${schemas.length}');
+    log('Sample data fetched from ${sampleData.length} tables');
+    
+    // Analisi del contesto per identificare tabelle rilevanti
+    final contextAnalysis = await widget.geminiService.analyzeQueryContext(
+      question,
+      jsonEncode(schemas),
+      tableNames,
+      sampleData,
+    );
+    
+    log('Context analysis: ${jsonEncode(contextAnalysis)}');
+
+    // Genera query SQL con contesto arricchito
+    final sqlQuery = await widget.geminiService.generateSqlQuery(
+      question,
+      jsonEncode(schemas),
+      jsonEncode(tableNames),
+      sampleData: sampleData,
+      contextAnalysis: contextAnalysis,
+    );
+
+    final cleanedSqlQuery =
+        sqlQuery
+            .replaceAll('sql', ' ')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .replaceAll(RegExp(r'\n'), ' ')
+            .replaceAll('```', '')
+            .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT')
+            .trim();
+
+    log('Executing SQL query: $cleanedSqlQuery');
+
+    // Set the query string to display the banner
     setState(() {
-      _isLoading = true;
-      _errorMessage = '';
-      _currentExecutingQuery = null; // Clear previous query if any
+      _currentExecutingQuery = cleanedSqlQuery;
     });
 
-    try {
-      // Recupera il nome del progetto
-      final projectId = widget.bigQueryService.projectId;
+    final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
+    log('Query Results: ${jsonEncode(results)}');
 
-      // Recupera la lista dei dataset
-      final datasets = await widget.bigQueryService.getDatasets();
+    final analysis = await widget.geminiService.analyzeQueryResults(
+      cleanedSqlQuery,
+      results,
+    );
 
-      log('List of datasets: $datasets');
-      // Check if datasets are empty, handle appropriately
-      if (datasets.isEmpty) {
-        throw Exception("No datasets found in the project. Cannot proceed.");
-      }
-
-      // Recupera la lista delle tabelle (using the first dataset for now)
-      // TODO: Allow user to select dataset for queries if multiple exist
-      final targetDataset = datasets[0];
-      final tables = await widget.bigQueryService.getTables(targetDataset);
-
-      log('List of tables in $targetDataset: $tables');
-      if (tables.isEmpty) {
-        // Allow query generation even if no tables exist, BQ might handle public datasets etc.
-        log(
-          'Warning: No tables found in dataset $targetDataset. Query might fail if it targets specific tables.',
-        );
-      }
-
-      // Recupera lo schema delle tabelle
-      List schemas = [];
-      List<String> tableNames = []; // Store fully qualified names here
-
-      for (var table in tables) {
-        try {
-          schemas.add(
-            await widget.bigQueryService.getTableSchema(
-              targetDataset, // Nome del dataset
-              table, // Nome della tabella
-            ),
-          );
-          // Prendi i nomi completi di tutte le tabelle successfully fetched
-          tableNames.add('$projectId.$targetDataset.$table');
-        } catch (e) {
-          log(
-            'Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e',
-          );
-          // Optionally inform the user or exclude table from context
-        }
-      }
-
-      log('Table schemas fetched: ${schemas.length}');
-      log('Fully qualified table names for context: $tableNames');
-
-      // Genera query SQL
-      final sqlQuery = await widget.geminiService.generateSqlQuery(
-        question,
-        jsonEncode(schemas), // Elenco degli schemas
-        jsonEncode(tableNames), // Elenco dei nomi delle tabelle
-      );
-
-      final cleanedSqlQuery =
-          sqlQuery
-              .replaceAll('sql', ' ') // Rimuove caratteri indesiderati
-              .replaceAll(RegExp(r'\s+'), ' ') // Rimuove spazi multipli
-              .replaceAll(RegExp(r'\n'), ' ') // Rimuove newline
-              .replaceAll('```', '') // Rimuove virgolette triple
-              .replaceAll(
-                RegExp(r'^\s*SELECT', caseSensitive: false),
-                'SELECT',
-              ) // Ensure SELECT starts at beginning if present
-              .trim(); // Rimuove spazi iniziali e finali
-
-      log('Executing SQL query: $cleanedSqlQuery');
-
-      // Set the query string to display the banner
-      setState(() {
-        _currentExecutingQuery = cleanedSqlQuery;
-      });
-
-      final results = await widget.bigQueryService.executeQuery(
-        cleanedSqlQuery,
-      );
-      log('Query Results: ${jsonEncode(results)}'); // Log results for debugging
-
-      final analysis = await widget.geminiService.analyzeQueryResults(
-        cleanedSqlQuery, // Pass cleaned query for analysis context
-        results,
-      );
-
-      if (!mounted) return;
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder:
-              (context) => ResultPage(
-                question: question,
-                sqlQuery: cleanedSqlQuery, // Show cleaned query
-                results: results,
-                analysis: analysis,
-              ),
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ResultPage(
+          question: question,
+          sqlQuery: cleanedSqlQuery,
+          results: results,
+          analysis: analysis,
         ),
-      );
-    } catch (e) {
-      log('Error processing question: ${e.toString()}', error: e);
-      setState(() {
-        // Improve error message display
-        if (e is Exception) {
-          _errorMessage = e.toString().replaceFirst(
-            'Exception: ',
-            '',
-          ); // Cleaner message
-        } else {
-          _errorMessage = 'An unexpected error occurred: ${e.toString()}';
-        }
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _currentExecutingQuery =
-              null; // Clear the query when done or on error
-        });
+      ),
+    );
+  } catch (e) {
+    log('Error processing question: ${e.toString()}', error: e);
+    setState(() {
+      if (e is Exception) {
+        _errorMessage = e.toString().replaceFirst('Exception: ', '');
+      } else {
+        _errorMessage = 'An unexpected error occurred: ${e.toString()}';
       }
+    });
+  } finally {
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _currentExecutingQuery = null;
+      });
     }
   }
+}
 
   // --- CSV Upload Methods ---
 
@@ -698,7 +701,7 @@ class _SearchPageState extends State<SearchPage> {
                               maxLines: 3,
                               minLines: 1,
                               textInputAction: TextInputAction.done,
-                              onSubmitted: (_) => _processQuestion(),
+                              onSubmitted: (_) => _processQuestion(_questionController.text),
                             ),
                             const SizedBox(height: 12),
                             // --- Row for Buttons ---
@@ -721,12 +724,12 @@ class _SearchPageState extends State<SearchPage> {
                                 // Send Button (existing - style is already good)
                                 ElevatedButton(
                                   onPressed:
-                                      _isLoading ||
-                                              _questionController.text
-                                                  .trim()
-                                                  .isEmpty
-                                          ? null
-                                          : _processQuestion,
+                                    _isLoading ||
+                                            _questionController.text
+                                                .trim()
+                                                .isEmpty
+                                        ? null
+                                        : () => _processQuestion(_questionController.text),
                                   style: ElevatedButton.styleFrom(
                                     padding: const EdgeInsets.symmetric(
                                       vertical: 12,
@@ -879,6 +882,15 @@ class _SearchPageState extends State<SearchPage> {
                     style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
                   ),
                   const SizedBox(height: 16), // Space at the bottom
+                  Text(
+                    'This open-source project was developed for the Big Data exam by Luca Borrelli and Davide Mariani.',
+                    style: TextStyle(
+                      color: Colors.grey.shade500,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
                 ],
               ),
             ),
