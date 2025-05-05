@@ -1,6 +1,20 @@
-functions-framework
-google-cloud-storage>=2.16.0
-pandas
-pyarrow
-pyiceberg
-cloudevents
+# Google Cloud Functions Framework (necessario per Cloud Run con HTTP trigger)
+functions-framework==3.5.0
+
+# Google Cloud Storage client
+google-cloud-storage==2.16.0
+
+# Web framework (usato sotto il cofano da functions-framework)
+flask==2.3.3
+
+# Data handling
+pandas==2.2.2
+
+# Supporto per file Parquet (necessario per df.to_parquet)
+pyarrow==15.0.2
+fastparquet==2024.2.0
+
+# JSON e CSV sono già gestiti da pandas
+
+# Per sicurezza, aggiungiamo anche:
+requests==2.31.0
