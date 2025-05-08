@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as dev;
 import 'package:easy_query/services/rest_service.dart';
 
 class GeminiFlashService {
@@ -306,5 +307,42 @@ class GeminiFlashService {
     }
 
     throw Exception('Failed to analyze query results');
+  }
+
+  /// Genera una risposta di testo generica con Gemini
+  Future<String> generateText(String prompt) async {
+    try {
+      final payload = {
+        'contents': [
+          {
+            'parts': [
+              {
+                'text': prompt
+              },
+            ],
+          },
+        ],
+        'generationConfig': {
+          'temperature': 0.2,
+          'topP': 0.8,
+          'topK': 40
+        },
+      };
+
+      // Utilizza gemini-2.0-flash invece di gemini-pro per mantenere coerenza con gli altri metodi
+      final response = await _restService.post(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+        payload,
+      );
+
+      if (response['candidates'] != null && response['candidates'].isNotEmpty) {
+        return response['candidates'][0]['content']['parts'][0]['text'].trim();
+      }
+
+      throw Exception('No text in Gemini response');
+    } catch (e) {
+      dev.log('Error generating text with Gemini: $e', error: e);
+      throw Exception('Failed to generate text with Gemini: $e');
+    }
   }
 }
