@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:flutter_app_icons/flutter_app_icons.dart';
 import 'package:flutter/foundation.dart' show kReleaseMode;
+import 'package:easy_query/services/cloud_storage_service.dart';
 
 Future<String> fetchGeminiApiKey() async {
   final response = await http.get(
@@ -78,17 +79,29 @@ void main() async {
   final bigQueryService = BigQueryService(projectId: projectId);
   await bigQueryService.initialize(credentialsJson);
 
-  runApp(MyApp(geminiService: geminiService, bigQueryService: bigQueryService));
+  // Initialize Cloud Storage service
+  final cloudStorageService = CloudStorageService(projectId: projectId);
+  await cloudStorageService.initialize(credentialsJson);
+
+  runApp(
+    MyApp(
+      geminiService: geminiService,
+      bigQueryService: bigQueryService,
+      cloudStorageService: cloudStorageService,
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {
   final GeminiFlashService geminiService;
   final BigQueryService bigQueryService;
+  final CloudStorageService cloudStorageService;
 
   const MyApp({
     super.key,
     required this.geminiService,
     required this.bigQueryService,
+    required this.cloudStorageService,
   });
 
   @override
@@ -102,6 +115,7 @@ class MyApp extends StatelessWidget {
       home: SearchPage(
         geminiService: geminiService,
         bigQueryService: bigQueryService,
+        cloudStorageService: cloudStorageService,
       ),
       debugShowCheckedModeBanner: false,
     );

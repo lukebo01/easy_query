@@ -5,15 +5,18 @@ import 'package:file_picker/file_picker.dart'; // Added
 import 'package:easy_query/services/gemini_flash_service.dart';
 import 'package:easy_query/services/big_query_service.dart';
 import 'package:easy_query/pages/result_page.dart';
+import 'package:easy_query/services/cloud_storage_service.dart';
 
 class SearchPage extends StatefulWidget {
   final GeminiFlashService geminiService;
   final BigQueryService bigQueryService;
+  final CloudStorageService cloudStorageService;
 
   const SearchPage({
     super.key,
     required this.geminiService,
     required this.bigQueryService,
+    required this.cloudStorageService,
   });
 
   @override
@@ -28,10 +31,10 @@ class _SearchPageState extends State<SearchPage> {
 
   // --- State for Upload Dialog ---
   final TextEditingController _tableNameController = TextEditingController();
+  final TextEditingController _folderPathController = TextEditingController();
   bool _isUploading = false; // Loading state for file upload
   String _uploadErrorMessage = '';
   PlatformFile? _selectedFile;
-  // List<String> _availableDatasets = []; // Moved local to dialog fetch
   String? _selectedDataset;
   // --- End State for Upload Dialog ---
 
@@ -47,6 +50,7 @@ class _SearchPageState extends State<SearchPage> {
   void dispose() {
     _questionController.dispose();
     _tableNameController.dispose(); // Dispose the new controller
+    _folderPathController.dispose();
     // Consider calling widget.bigQueryService.dispose() here or in the parent widget
     super.dispose();
   }
@@ -254,16 +258,13 @@ class _SearchPageState extends State<SearchPage> {
     StateSetter dialogSetState,
     BuildContext dialogContext,
   ) async {
-    if (_selectedFile == null ||
-        _selectedDataset == null ||
-        _tableNameController.text.trim().isEmpty) {
+    if (_selectedFile == null || _tableNameController.text.trim().isEmpty) {
       dialogSetState(() {
-        _uploadErrorMessage =
-            'Please select a file, dataset, and enter a table name.';
+        _uploadErrorMessage = 'Please select a file and enter a file name.';
       });
       return;
     }
-    // Double check bytes are loaded (especially for web)
+
     if (_selectedFile!.bytes == null) {
       dialogSetState(() {
         _uploadErrorMessage =
@@ -278,68 +279,55 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      final tableName = _tableNameController.text.trim();
-      final datasetId = _selectedDataset!;
-      final csvBytes =
-          _selectedFile!.bytes!; // Non-null asserted due to checks above
+      final fileName = _tableNameController.text.trim();
+      final folderPath = _folderPathController.text.trim();
+      final csvBytes = _selectedFile!.bytes!;
 
       log(
-        'Attempting to upload ${_selectedFile!.name} to $datasetId.$tableName (${csvBytes.lengthInBytes} bytes)',
+        'Attempting to upload ${_selectedFile!.name} to GCS: $folderPath/$fileName',
       );
-      await widget.bigQueryService.uploadCsvToTable(
-        datasetId,
-        tableName,
-        csvBytes,
-      );
-      log('Upload successful for ${_selectedFile!.name}');
 
-      // Close dialog on success
+      final url = await widget.cloudStorageService.uploadFile(
+        fileName: folderPath.isEmpty ? fileName : '$folderPath/$fileName',
+        fileBytes: csvBytes,
+        contentType: 'text/csv',
+      );
+
+      log('Upload successful. File available at: $url');
+
       if (Navigator.canPop(dialogContext)) {
         Navigator.pop(dialogContext);
       }
-      // Show success message using ScaffoldMessenger
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'File "${_selectedFile!.name}" uploaded successfully to $datasetId.$tableName!',
+            'File "${_selectedFile!.name}" uploaded successfully!\nURL: $url',
             style: const TextStyle(color: Colors.black),
-          ), // Black text for contrast
-          backgroundColor: Colors.green[100], // Lighter green
-          behavior: SnackBarBehavior.floating, // Optional: makes it float
+          ),
+          backgroundColor: Colors.green[100],
+          behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(
-            // Optional: rounded corners
             borderRadius: BorderRadius.circular(10.0),
           ),
-          margin: const EdgeInsets.all(10), // Add margin for floating snackbar
+          margin: const EdgeInsets.all(10),
         ),
       );
-      // Clear state variables after successful upload
+
       setState(() {
         _selectedFile = null;
-        _selectedDataset = null;
         _tableNameController.clear();
+        _folderPathController.clear();
         _uploadErrorMessage = '';
-        // _availableDatasets = []; // No need to clear here, fetched in dialog
       });
     } catch (e) {
       log('Error uploading file: $e', error: e);
-      String friendlyErrorMessage;
-      if (e is Exception) {
-        friendlyErrorMessage = e.toString().replaceFirst(
-          'Exception: ',
-          '',
-        ); // Cleaner message
-      } else {
-        friendlyErrorMessage = 'An unexpected error occurred during upload.';
-      }
       dialogSetState(() {
-        // Make error more specific if possible (e.g., check for common BQ errors)
-        _uploadErrorMessage = 'Upload failed: $friendlyErrorMessage';
+        _uploadErrorMessage =
+            'Upload failed: ${e.toString().replaceFirst('Exception: ', '')}';
       });
     } finally {
-      // Ensure isUploading is set to false even if dialog closing fails
       if (mounted) {
-        // Check if the widget is still in the tree
         dialogSetState(() {
           _isUploading = false;
         });
@@ -348,37 +336,17 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   void _showUploadDialog() async {
-    // Reset state for the dialog each time it opens
-    // No need for global setState here, StatefulBuilder manages dialog state
     _selectedFile = null;
-    String? localSelectedDataset = null; // Use local var for initial state
     _tableNameController.clear();
+    _folderPathController.clear();
     _uploadErrorMessage = '';
     _isUploading = false;
-    List<String> datasets = []; // Local variable for datasets in dialog scope
-    String initialError = '';
 
-    // Fetch datasets *before* showing the dialog or show loading inside
-    try {
-      datasets = await widget.bigQueryService.getDatasets();
-      // If only one dataset, pre-select it
-      if (datasets.length == 1) {
-        localSelectedDataset = datasets.first;
-      }
-    } catch (e) {
-      log('Error fetching datasets for dialog: $e');
-      initialError =
-          'Could not load datasets: ${e.toString().replaceFirst('Exception: ', '')}';
-      // This error will be shown inside the dialog
-    }
+    if (!mounted) return;
 
-    if (!mounted)
-      return; // Check if widget is still mounted before showing dialog
-
-    // Show the dialog
     showDialog(
       context: context,
-      barrierDismissible: !_isUploading, // Prevent closing while uploading
+      barrierDismissible: !_isUploading,
       builder: (BuildContext dialogContext) {
         // Define dark theme colors (adjust as needed to match your exact theme)
         const dialogBackgroundColor = Color.fromARGB(255, 30, 30, 30);
@@ -395,21 +363,13 @@ class _SearchPageState extends State<SearchPage> {
         // Use StatefulBuilder to manage the dialog's internal state independently
         return StatefulBuilder(
           builder: (context, StateSetter dialogSetState) {
-            // Use the locally fetched dataset state within the builder
-            _selectedDataset = localSelectedDataset;
-
-            // Function to update state within the dialog
-            void updateDialogState(VoidCallback fn) {
-              dialogSetState(fn);
-            }
-
             return AlertDialog(
               backgroundColor: dialogBackgroundColor,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(16),
               ),
               title: const Text(
-                'Upload CSV to BigQuery',
+                'Upload CSV to GCS',
                 style: TextStyle(color: textColor),
               ),
               content: SingleChildScrollView(
@@ -433,7 +393,7 @@ class _SearchPageState extends State<SearchPage> {
                                   ? null
                                   : () async {
                                     await _pickFile(
-                                      updateDialogState,
+                                      dialogSetState,
                                     ); // Use local state update
                                   },
                         ),
@@ -451,81 +411,47 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                     const SizedBox(height: 20),
 
-                    // Dataset Dropdown or Loading/Error
-                    if (initialError.isNotEmpty)
-                      Text(initialError, style: TextStyle(color: errorColor))
-                    else if (datasets.isEmpty && initialError.isEmpty)
-                      const Center(
-                        child: CircularProgressIndicator(color: accentColor),
-                      ) // Loading datasets
-                    else
-                      DropdownButtonFormField<String>(
-                        value: _selectedDataset,
-                        dropdownColor:
-                            dialogBackgroundColor, // Match background
-                        style: const TextStyle(color: textColor),
-                        hint: const Text(
-                          'Select Dataset',
-                          style: TextStyle(color: hintColor),
+                    // Folder Path Input (new)
+                    TextField(
+                      controller: _folderPathController,
+                      enabled: !_isUploading,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        labelText: 'Folder Path (optional)',
+                        hintText: 'e.g., folder/subfolder',
+                        labelStyle: const TextStyle(color: hintColor),
+                        hintStyle: const TextStyle(color: hintColor),
+                        filled: true,
+                        fillColor: inputFillColor,
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: inputBorderColor),
                         ),
-                        iconEnabledColor: textColor,
-                        onChanged:
-                            _isUploading
-                                ? null
-                                : (String? newValue) {
-                                  updateDialogState(() {
-                                    // Use local state update
-                                    localSelectedDataset =
-                                        newValue; // Update local variable
-                                    _selectedDataset =
-                                        newValue; // Update state variable if needed elsewhere
-                                  });
-                                },
-                        items:
-                            datasets.map<DropdownMenuItem<String>>((
-                              String value,
-                            ) {
-                              return DropdownMenuItem<String>(
-                                value: value,
-                                child: Text(value),
-                              );
-                            }).toList(),
-                        decoration: InputDecoration(
-                          labelText: 'Target Dataset',
-                          labelStyle: const TextStyle(color: hintColor),
-                          filled: true,
-                          fillColor: inputFillColor,
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: inputBorderColor,
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: accentColor,
-                            ), // Highlight focus
-                          ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(
+                            color: accentColor,
+                          ), // Highlight focus
                         ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        // Make counter text white if needed (usually inherits)
+                        counterStyle: const TextStyle(color: hintColor),
                       ),
-
+                      maxLength: 1024, // BigQuery max table name length
+                    ),
                     const SizedBox(height: 15),
 
-                    // Table Name Input
+                    // File Name Input (modified from table name)
                     TextField(
                       controller: _tableNameController,
                       enabled: !_isUploading,
-                      style: const TextStyle(
-                        color: textColor,
-                      ), // Input text color
+                      style: const TextStyle(color: Colors.white),
                       decoration: InputDecoration(
-                        labelText: 'New Table Name',
+                        labelText: 'File Name',
+                        hintText: 'Enter name for the file',
                         labelStyle: const TextStyle(color: hintColor),
-                        hintText: 'Enter name for the new table',
                         hintStyle: const TextStyle(color: hintColor),
                         filled: true,
                         fillColor: inputFillColor,
@@ -596,15 +522,12 @@ class _SearchPageState extends State<SearchPage> {
                   // Update condition to use localSelectedDataset for initial check if needed
                   onPressed:
                       (_selectedFile == null ||
-                              localSelectedDataset == null ||
                               _tableNameController.text.trim().isEmpty ||
                               _isUploading)
                           ? null // Disable if conditions not met or already uploading
                           : () async {
-                            // Ensure _selectedDataset is correctly set before calling upload
-                            _selectedDataset = localSelectedDataset;
                             await _uploadCsvFile(
-                              updateDialogState,
+                              dialogSetState,
                               dialogContext,
                             ); // Use local state update
                           },

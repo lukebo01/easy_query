@@ -19,6 +19,8 @@ dependencies:
   flutter_dotenv: ^5.2.1
   file_picker: ^8.0.6 # Added for file selection
   csv: ^6.0.0        # Added for CSV parsing
+  googleapis: ^11.0.0
+  googleapis_auth: ^1.4.1
 
 dev_dependencies:
   flutter_test:
