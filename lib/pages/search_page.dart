@@ -161,6 +161,10 @@ class _SearchPageState extends State<SearchPage> {
       log('Table schemas fetched: ${schemas.length}');
       log('Sample data fetched from ${sampleData.length} tables');
 
+      // Recupera i file caricati nel bucket bronze
+      final cloudFilesTree = await widget.cloudStorageService.getAllFilesTree();
+      log('Files in bucket: $cloudFilesTree');
+
       // Analisi del contesto per identificare tabelle rilevanti
       setState(() {
         _currentExecutingQuery = 'Analyzing dataset context...';
@@ -169,6 +173,7 @@ class _SearchPageState extends State<SearchPage> {
       final contextAnalysis = await widget.geminiService.analyzeQueryContext(
         question,
         jsonEncode(schemas),
+        cloudFilesTree,
         tableNames,
         sampleData,
       );

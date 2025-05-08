@@ -46,6 +46,7 @@ class GeminiFlashService {
   Future<Map<String, dynamic>> analyzeQueryContext(
     String userQuestion,
     String databaseSchema,
+    String cloudFilesAndMetadata,
     List<String> tableNames,
     Map<String, List<Map<String, dynamic>>> sampleData,
   ) async {
@@ -61,6 +62,8 @@ class GeminiFlashService {
             You are a data analyst tasked with identifying ALL relevant tables for a query and their precise relationships. You'll analyze the user's question, database schemas from tabels in BigQuery, files in Google Cloud Storage and sample data to provide a comprehensive analysis.
             
             User question: $userQuestion
+
+            Cloud files and their metadata: $cloudFilesAndMetadata
             
             Database schemas: $databaseSchema
             
@@ -73,11 +76,13 @@ class GeminiFlashService {
             4. For join conditions, don't rely only on column names but analyze the actual data to find potential foreign key relationships
             5. Consider fuzzy matching between similar values in different tables (e.g., "Electronics" in one table might correspond to "Electronic Devices" in another)
             6. Determine precise join conditions based on the actual data values, not just schema similarities
+            7. Evaluate if cloud files are needed for the query, they will trasformed in tables so suggest them ONLY IF NEEDED
 
             IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
             
             Return your analysis as a JSON object with this structure:
             {
+              "suggested_files": ["file1", "file2", "file3"],
               "relevant_tables": ["table1", "table2", "table3"],
               "relevant_columns": {
                 "table1": ["col1", "col2"],
