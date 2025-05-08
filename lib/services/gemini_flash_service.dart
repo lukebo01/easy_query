@@ -345,4 +345,73 @@ class GeminiFlashService {
       throw Exception('Failed to generate text with Gemini: $e');
     }
   }
+
+  /// Analyze file content and metadata to suggest an appropriate storage path
+  Future<String> suggestFilePath(
+    String bucketStructure,
+    Map<String, dynamic> fileMetadata,
+    String? fileContent,
+  ) async {
+    try {
+      // Build prompt for the LLM
+      final prompt = '''
+      Analyze the following bucket structure and file metadata. 
+      Suggest the most appropriate storage path in the format folder/subfolder/ based on:
+      1. The existing bucket structure
+      2. The file type and content
+      3. The tags and metadata provided
+      4. The context of the file (e.g., if it's a report, image, etc.)
+
+      BUCKET STRUCTURE:
+      $bucketStructure
+
+      FILE METADATA:
+      ${fileMetadata.entries.map((e) => '${e.key}: ${e.value}').join('\n')}
+
+      FILE CONTENT (sample):
+      ${fileContent ?? 'Binary file - content not available'}
+
+      Respond ONLY with the suggested path in the format /folder/subfolder/ without adding the filename.
+      If new folders need to be created, briefly explain why.
+      ''';
+      
+      // Get response from LLM
+      final response = await generateText(prompt);
+      
+      // Extract the path from the response
+      return _extractPathFromResponse(response);
+    } catch (e) {
+      dev.log('Error suggesting file path: $e', error: e);
+      throw Exception('Failed to suggest file path: $e');
+    }
+  }
+  
+  /// Extract a path from LLM response
+  String _extractPathFromResponse(String response) {
+    // Look for a pattern that resembles a path
+    final RegExp pathRegex = RegExp(r'\/[a-zA-Z0-9_\-\/]+\/?');
+    final match = pathRegex.firstMatch(response);
+    
+    if (match != null) {
+      String path = match.group(0) ?? '';
+      
+      // Ensure the path starts with / and ends with /
+      if (!path.startsWith('/')) {
+        path = '/$path';
+      }
+      if (!path.endsWith('/')) {
+        path = '$path/';
+      }
+      
+      return path;
+    }
+    
+    // If no path pattern is found, extract the first line as a suggestion
+    final firstLine = response.split('\n').first.trim();
+    if (firstLine.isNotEmpty) {
+      return firstLine.startsWith('/') ? firstLine : '/$firstLine';
+    }
+    
+    return '/'; // Default: root of the bucket
+  }
 }

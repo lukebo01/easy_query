@@ -38,7 +38,7 @@ class _SearchPageState extends State<SearchPage> {
   String? _suggestedPath;
   String _bucketStructure = '';
   
-  // Metadati aggiuntivi per l'LLM
+  // Additional metadata for LLM
   Map<String, String> _additionalMetadata = {};
   final List<String> _availableTags = [
     'HR Data',
@@ -51,6 +51,7 @@ class _SearchPageState extends State<SearchPage> {
     'Product',
     'Inventory'
   ];
+
   final List<String> _availableDataCategories = [
     'Raw',
     'Processed',
@@ -61,6 +62,7 @@ class _SearchPageState extends State<SearchPage> {
     'Reference',
     'Master'
   ];
+  
   final List<String> _selectedTags = [];
   String? _selectedDataCategory;
   String? _dataDescription;
@@ -247,7 +249,7 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _pickFile(StateSetter dialogSetState) async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.any, // Accetta qualsiasi tipo di file
+        type: FileType.any, // Accept any file type
         withData: true,
       );
 
@@ -257,27 +259,27 @@ class _SearchPageState extends State<SearchPage> {
           dialogSetState(() {
             _selectedFile = file;
             _uploadErrorMessage = '';
-            _suggestedPath = null; // Reset il percorso suggerito
-            // Popoliamo il nome del file con il nome originale
+            _suggestedPath = null; // Reset suggested path
+            // Populate file name with original name
             _fileNameController.text = file.name;
-            log('File selezionato: ${file.name}, dimensione: ${file.size} bytes, tipo: ${file.extension}');
+            log('File selected: ${file.name}, size: ${file.size} bytes, type: ${file.extension}');
           });
           
-          // Dopo aver selezionato il file, analizza il bucket e suggerisci un percorso
+          // After selecting a file, analyze the bucket and suggest a path
           await _analyzeAndSuggestPath(dialogSetState);
         } else {
           dialogSetState(() {
-            _uploadErrorMessage = 'File non valido. Assicurati che il file contenga dati.';
+            _uploadErrorMessage = 'Invalid file. Please ensure the file contains data.';
             _selectedFile = null;
           });
         }
       } else {
-        log('Selezione file annullata');
+        log('File selection canceled');
       }
     } catch (e) {
-      log('Errore nella selezione del file: $e');
+      log('Error selecting file: $e');
       dialogSetState(() {
-        _uploadErrorMessage = 'Errore nella selezione del file: ${e.toString()}';
+        _uploadErrorMessage = 'Error selecting file: ${e.toString()}';
         _selectedFile = null;
       });
     }
@@ -292,79 +294,60 @@ class _SearchPageState extends State<SearchPage> {
     });
     
     try {
-      // 1. Ottieni la struttura del bucket
+      // 1. Get bucket structure
       final bucketHierarchy = await widget.cloudStorageService.listFolderHierarchy();
       _bucketStructure = _formatBucketHierarchy(bucketHierarchy);
       
-      // 2. Analizza il contenuto del file (per i file testuali/CSV)
+      // 2. Analyze file content (for text/CSV files)
       String fileContent = '';
       if (_selectedFile!.extension?.toLowerCase() == 'csv' || 
           _selectedFile!.extension?.toLowerCase() == 'txt' || 
           _selectedFile!.extension?.toLowerCase() == 'json') {
-        // Per file di testo, convertiamo i bytes in string
+        // For text files, convert bytes to string
         if (_selectedFile!.bytes != null) {
           try {
             fileContent = String.fromCharCodes(_selectedFile!.bytes!);
-            // Limita la quantità di contenuto da analizzare
+            // Limit the amount of content to analyze
             if (fileContent.length > 2000) {
               fileContent = fileContent.substring(0, 2000) + '...';
             }
           } catch (e) {
-            log('Impossibile convertire il file in testo: $e');
-            fileContent = 'Contenuto binario non analizzabile';
+            log('Unable to convert file to text: $e');
+            fileContent = 'Binary content not analyzable';
           }
         }
       } else {
-        fileContent = 'File binario di tipo ${_selectedFile!.extension}';
+        fileContent = 'Binary file of type ${_selectedFile!.extension}';
       }
       
-      // 3. Prepara i metadati per l'LLM
+      // 3. Prepare metadata for LLM
       final metadataForLLM = {
         'fileName': _selectedFile!.name,
         'fileType': _selectedFile!.extension ?? 'unknown',
         'fileSize': '${(_selectedFile!.size / 1024).toStringAsFixed(2)} KB',
-        'tags': _selectedTags.isEmpty ? 'nessuno' : _selectedTags.join(', '),
-        'category': _selectedDataCategory ?? 'non specificato',
-        'description': _dataDescription ?? 'non specificata',
+        'tags': _selectedTags.isEmpty ? 'none' : _selectedTags.join(', '),
+        'category': _selectedDataCategory ?? 'not specified',
+        'description': _dataDescription ?? 'not specified',
       };
       
-      // 4. Richiedi all'LLM di suggerire un percorso
-      final prompt = '''
-Analizza la seguente struttura del bucket e i metadati del file da caricare. 
-Suggerisci il percorso di archiviazione più appropriato nel formato /cartella/sottocartella/ basandoti su:
-1. La struttura esistente del bucket
-2. Il tipo e il contenuto del file
-3. I tag e i metadati associati
-
-STRUTTURA DEL BUCKET:
-$_bucketStructure
-
-METADATI DEL FILE:
-${metadataForLLM.entries.map((e) => '${e.key}: ${e.value}').join('\n')}
-
-CONTENUTO DEL FILE (esempio):
-$fileContent
-
-Rispondi SOLO con il percorso consigliato nel formato /cartella/sottocartella/ senza aggiungere il nome del file.
-Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
-''';
-      
-      final llmResponse = await widget.geminiService.generateText(prompt);
-      
-      // 5. Estrai il percorso dalla risposta dell'LLM
-      final suggestedPath = _extractPathFromLLMResponse(llmResponse);
+      // 4. Request path suggestion from GeminiFlashService
+      final suggestedPath = await widget.geminiService.suggestFilePath(
+        _bucketStructure,
+        metadataForLLM,
+        fileContent,
+      );
       
       dialogSetState(() {
         _suggestedPath = suggestedPath;
         _isAnalyzing = false;
       });
       
-      log('Percorso suggerito dall\'LLM: $_suggestedPath');
+      log('Path suggested by LLM: $_suggestedPath');
       
     } catch (e) {
-      log('Errore nell\'analisi del file: $e');
+      log('Error analyzing file: $e');
       dialogSetState(() {
-        _uploadErrorMessage = 'Errore nell\'analisi del file: ${e.toString()}';
+        _uploadErrorMessage = 'Error analyzing file: ${e.toString()}';
         _isAnalyzing = false;
       });
     }
@@ -382,34 +365,6 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
     
     return buffer.toString();
   }
-  
-  String _extractPathFromLLMResponse(String response) {
-    // Cerca un pattern che assomigli a un percorso
-    final RegExp pathRegex = RegExp(r'\/[a-zA-Z0-9_\-\/]+\/?');
-    final match = pathRegex.firstMatch(response);
-    
-    if (match != null) {
-      String path = match.group(0) ?? '';
-      
-      // Assicurati che il percorso inizi con / e termini con /
-      if (!path.startsWith('/')) {
-        path = '/$path';
-      }
-      if (!path.endsWith('/')) {
-        path = '$path/';
-      }
-      
-      return path;
-    }
-    
-    // In caso non riesca a trovare un percorso, estrai la prima riga come suggerimento
-    final firstLine = response.split('\n').first.trim();
-    if (firstLine.isNotEmpty) {
-      return firstLine.startsWith('/') ? firstLine : '/$firstLine';
-    }
-    
-    return '/'; // Default: root del bucket
-  }
 
   Future<void> _uploadFile(
     StateSetter dialogSetState,
@@ -417,24 +372,24 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
   ) async {
     if (_selectedFile == null) {
       dialogSetState(() {
-        _uploadErrorMessage = 'Seleziona un file prima di procedere.';
+        _uploadErrorMessage = 'Please select a file first.';
       });
       return;
     }
 
     if (_selectedFile!.bytes == null) {
       dialogSetState(() {
-        _uploadErrorMessage = 'Dati del file mancanti. Riseleziona il file.';
+        _uploadErrorMessage = 'Missing file data. Please reselect the file.';
       });
       return;
     }
     
-    // Se non è stato suggerito un percorso, richiedilo
+    // If no path suggested, request one
     if (_suggestedPath == null) {
       await _analyzeAndSuggestPath(dialogSetState);
       if (_suggestedPath == null) {
         dialogSetState(() {
-          _uploadErrorMessage = 'Impossibile determinare un percorso appropriato.';
+          _uploadErrorMessage = 'Unable to determine an appropriate path.';
         });
         return;
       }
@@ -446,25 +401,25 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
     });
 
     try {
-      // Utilizza il nome fornito o quello originale
+      // Use provided name or original name
       final fileName = _fileNameController.text.isEmpty ? 
                        _selectedFile!.name : 
                        _fileNameController.text;
       
-      // Assicurati che il nome del file includa l'estensione originale
+      // Ensure filename includes original extension
       String finalFileName = fileName;
       if (_selectedFile!.extension != null && !finalFileName.toLowerCase().endsWith('.${_selectedFile!.extension!.toLowerCase()}')) {
         finalFileName = '$finalFileName.${_selectedFile!.extension}';
       }
       
-      // Il percorso completo è il percorso suggerito + nome file
+      // Complete path is suggested path + filename
       String fullPath = _suggestedPath!;
       final fileBytes = _selectedFile!.bytes!;
       
-      // Determina il content type basato sull'estensione
+      // Determine content type based on extension
       String? contentType = _getContentTypeFromExtension(_selectedFile!.extension);
 
-      log('Tentativo di upload di ${_selectedFile!.name} nel bucket bronze al percorso: $fullPath$finalFileName');
+      log('Attempting to upload ${_selectedFile!.name} to bronze bucket at path: $fullPath$finalFileName');
 
       final url = await widget.cloudStorageService.uploadFile(
         fileName: '$fullPath$finalFileName',
@@ -472,7 +427,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
         contentType: contentType,
       );
 
-      log('Upload completato con successo nel bucket bronze. File disponibile a: $url');
+      log('Upload completed successfully to bronze bucket. File available at: $url');
 
       if (Navigator.canPop(dialogContext)) {
         Navigator.pop(dialogContext);
@@ -481,7 +436,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'File "${_selectedFile!.name}" caricato con successo nel bucket bronze!\nPercorso: $fullPath$finalFileName\nURL: $url',
+            'File "${_selectedFile!.name}" uploaded successfully to bronze bucket!\nPath: $fullPath$finalFileName\nURL: $url',
             style: const TextStyle(color: Colors.black),
           ),
           backgroundColor: Colors.green[100],
@@ -505,9 +460,9 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
         _dataDescription = null;
       });
     } catch (e) {
-      log('Errore durante il caricamento del file: $e', error: e);
+      log('Error uploading file: $e', error: e);
       dialogSetState(() {
-        _uploadErrorMessage = 'Upload fallito: ${e.toString().replaceFirst('Exception: ', '')}';
+        _uploadErrorMessage = 'Upload failed: ${e.toString().replaceFirst('Exception: ', '')}';
       });
     } finally {
       if (mounted) {
@@ -585,7 +540,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                   const Icon(Icons.cloud_upload, color: accentColor),
                   const SizedBox(width: 10),
                   const Text(
-                    'Upload Intelligente nel Bronze Bucket',
+                    'Intelligent Upload to Bronze Bucket',
                     style: TextStyle(color: textColor),
                   ),
                   const Spacer(),
@@ -602,7 +557,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
               ),
               content: SingleChildScrollView(
                 child: SizedBox(
-                  width: 500, // Larghezza fissa per contenere tutti i controlli
+                  width: 500, // Fixed width to contain all controls
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -619,7 +574,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                               ),
                             ),
                             icon: const Icon(Icons.attach_file, size: 18),
-                            label: const Text('Seleziona File'),
+                            label: const Text('Select File'),
                             onPressed: (_isUploading || _isAnalyzing)
                                 ? null
                                 : () async {
@@ -629,7 +584,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              _selectedFile?.name ?? 'Nessun file selezionato',
+                              _selectedFile?.name ?? 'No file selected',
                               style: const TextStyle(color: hintColor),
                               overflow: TextOverflow.fade,
                               maxLines: 1,
@@ -640,14 +595,14 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                       ),
                       const SizedBox(height: 20),
                       
-                      // File Name Input (opzionale)
+                      // File Name Input (optional)
                       TextField(
                         controller: _fileNameController,
                         enabled: !_isUploading && !_isAnalyzing,
                         style: const TextStyle(color: Colors.white),
                         decoration: InputDecoration(
-                          labelText: 'Nome File (opzionale)',
-                          hintText: 'Lascia vuoto per usare il nome originale',
+                          labelText: 'File Name (optional)',
+                          hintText: 'Leave empty to use original name',
                           labelStyle: const TextStyle(color: hintColor),
                           hintStyle: const TextStyle(color: hintColor),
                           filled: true,
@@ -669,7 +624,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                       
                       // Metadata Section Title
                       const Text(
-                        'Metadati Opzionali',
+                        'Optional Metadata',
                         style: TextStyle(
                           color: textColor,
                           fontWeight: FontWeight.bold,
@@ -678,10 +633,10 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                       ),
                       const SizedBox(height: 10),
                       
-                      // Categoria Dropdown
+                      // Category Dropdown
                       DropdownButtonFormField<String>(
                         decoration: InputDecoration(
-                          labelText: 'Categoria',
+                          labelText: 'Category',
                           labelStyle: const TextStyle(color: hintColor),
                           filled: true,
                           fillColor: inputFillColor,
@@ -701,7 +656,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                             : (String? newValue) {
                                 dialogSetState(() {
                                   _selectedDataCategory = newValue;
-                                  // Rianalizza dopo aver cambiato i metadati
+                                  // Reanalyze after changing metadata
                                   if (_selectedFile != null) {
                                     _analyzeAndSuggestPath(dialogSetState);
                                   }
@@ -712,7 +667,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                           return DropdownMenuItem<String>(
                             value: value,
                             child: Text(
-                              value ?? 'Seleziona una categoria',
+                              value ?? 'Select a category',
                               style: TextStyle(
                                 color: value == null ? hintColor : textColor,
                               ),
@@ -730,14 +685,14 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                         maxLines: 2,
                         onChanged: (value) {
                           _dataDescription = value;
-                          // Rianalizza se cambia la descrizione
+                          // Reanalyze if description changes
                           if (_selectedFile != null && value.isNotEmpty) {
                             _analyzeAndSuggestPath(dialogSetState);
                           }
                         },
                         decoration: InputDecoration(
-                          labelText: 'Descrizione',
-                          hintText: 'Descrivi il contenuto del file',
+                          labelText: 'Description',
+                          hintText: 'Describe the file content',
                           labelStyle: const TextStyle(color: hintColor),
                           hintStyle: const TextStyle(color: hintColor),
                           filled: true,
@@ -762,7 +717,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Tag (seleziona uno o più)',
+                            'Tags (select one or more)',
                             style: TextStyle(color: hintColor),
                           ),
                           const SizedBox(height: 8),
@@ -788,7 +743,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                                           } else {
                                             _selectedTags.remove(tag);
                                           }
-                                          // Rianalizza dopo aver cambiato i tag
+                                          // Reanalyze after changing tags
                                           if (_selectedFile != null) {
                                             _analyzeAndSuggestPath(dialogSetState);
                                           }
@@ -819,7 +774,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const Text(
-                                'Percorso suggerito:',
+                                'Suggested path:',
                                 style: TextStyle(
                                   color: Colors.green,
                                   fontWeight: FontWeight.bold,
@@ -844,7 +799,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                                 CircularProgressIndicator(color: accentColor),
                                 SizedBox(height: 8),
                                 Text(
-                                  'Caricamento in corso...',
+                                  'Upload in progress...',
                                   style: TextStyle(color: textColor),
                                 ),
                               ],
@@ -868,7 +823,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
               actions: <Widget>[
                 TextButton(
                   style: TextButton.styleFrom(foregroundColor: hintColor),
-                  child: const Text('Annulla'),
+                  child: const Text('Cancel'),
                   onPressed: (_isUploading || _isAnalyzing)
                       ? null
                       : () => Navigator.of(dialogContext).pop(),
@@ -899,7 +854,7 @@ Se è necessario creare nuove cartelle, spiegane brevemente il motivo.
                             color: buttonTextColor,
                           ),
                         )
-                      : const Text('Carica'),
+                      : const Text('Upload'),
                 ),
               ],
             );
