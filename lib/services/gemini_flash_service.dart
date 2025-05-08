@@ -7,8 +7,8 @@ class GeminiFlashService {
   final String _apiKey;
 
   GeminiFlashService({required RestService restService, required String apiKey})
-      : _restService = restService,
-        _apiKey = apiKey;
+    : _restService = restService,
+      _apiKey = apiKey;
 
   /// Translate user question to English if needed
   Future<String> translateToEnglish(String userQuestion) async {
@@ -21,7 +21,7 @@ class GeminiFlashService {
                 If the following text is not in English, translate it to English. If it's already in English, return it unchanged.
                 Text: $userQuestion
                 Return only the translated or original text without any explanations.
-              '''
+              ''',
             },
           ],
         },
@@ -37,7 +37,7 @@ class GeminiFlashService {
     if (response['candidates'] != null && response['candidates'].isNotEmpty) {
       return response['candidates'][0]['content']['parts'][0]['text'].trim();
     }
-    
+
     // If translation fails, return original text
     return userQuestion;
   }
@@ -51,14 +51,14 @@ class GeminiFlashService {
   ) async {
     // Convert sample data to a string format
     final sampleDataStr = jsonEncode(sampleData);
-    
-     final payload = {
-  'contents': [
-    {
-      'parts': [
+
+    final payload = {
+      'contents': [
         {
-          'text': '''
-            You are a data analyst tasked with identifying ALL relevant tables for a query and their precise relationships.
+          'parts': [
+            {
+              'text': '''
+            You are a data analyst tasked with identifying ALL relevant tables for a query and their precise relationships. You'll analyze the user's question, database schemas from tabels in BigQuery, files in Google Cloud Storage and sample data to provide a comprehensive analysis.
             
             User question: $userQuestion
             
@@ -66,14 +66,14 @@ class GeminiFlashService {
             
             Sample data from tables: $sampleDataStr
             
-            Analyze the question, database schemas, and sample data thoroughly, then:
+            Analyze the question, database schemas, cloud files and sample data thoroughly, then:
             1. Identify ALL tables that could be relevant to the user's question (be inclusive rather than exclusive)
             2. For each relevant table, identify the key columns that should be included
             3. Look for semantic connections between columns by examining both column names AND actual data values
             4. For join conditions, don't rely only on column names but analyze the actual data to find potential foreign key relationships
             5. Consider fuzzy matching between similar values in different tables (e.g., "Electronics" in one table might correspond to "Electronic Devices" in another)
             6. Determine precise join conditions based on the actual data values, not just schema similarities
-            
+
             IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
             
             Return your analysis as a JSON object with this structure:
@@ -114,13 +114,13 @@ class GeminiFlashService {
                 }
               ]
             }
-          '''
+          ''',
+            },
+          ],
         },
       ],
-    },
-  ],
-  'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
-};
+      'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
+    };
 
     final response = await _restService.post(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
@@ -128,7 +128,8 @@ class GeminiFlashService {
     );
 
     if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      final analysisText = response['candidates'][0]['content']['parts'][0]['text'];
+      final analysisText =
+          response['candidates'][0]['content']['parts'][0]['text'];
       // Extract the JSON part from the response
       final jsonStartIndex = analysisText.indexOf('{');
       final jsonEndIndex = analysisText.lastIndexOf('}') + 1;
@@ -141,7 +142,7 @@ class GeminiFlashService {
         }
       }
     }
-    
+
     throw Exception('Failed to analyze query context');
   }
 
@@ -152,33 +153,38 @@ class GeminiFlashService {
     Map<String, List<Map<String, dynamic>>>? sampleData,
     Map<String, dynamic>? contextAnalysis,
   }) async {
-   // First translate question to English if needed
-  final englishQuestion = await translateToEnglish(userQuestion);
-  
-  // Build a more comprehensive prompt with context information
-  String contextInfo = '';
-  String sampleDataInfo = '';
-  
-  if (sampleData != null) {
-    // Provide a small sample of data from each table to help with join logic
-    final sampleDataPreview = <String, List<Map<String, dynamic>>>{};
-    sampleData.forEach((key, value) {
-      sampleDataPreview[key] = value.length > 3 ? value.sublist(0, 3) : value;
-    });
-    sampleDataInfo = '''
+    // First translate question to English if needed
+    final englishQuestion = await translateToEnglish(userQuestion);
+
+    // Build a more comprehensive prompt with context information
+    String contextInfo = '';
+    String sampleDataInfo = '';
+
+    if (sampleData != null) {
+      // Provide a small sample of data from each table to help with join logic
+      final sampleDataPreview = <String, List<Map<String, dynamic>>>{};
+      sampleData.forEach((key, value) {
+        sampleDataPreview[key] = value.length > 3 ? value.sublist(0, 3) : value;
+      });
+      sampleDataInfo = '''
       Sample data preview: ${jsonEncode(sampleDataPreview)}
     ''';
-  }
-  
-  if (contextAnalysis != null) {
-    final relevantTables = contextAnalysis['relevant_tables']?.join(', ') ?? '';
-    final relevantColumnsJson = jsonEncode(contextAnalysis['relevant_columns'] ?? {});
-    final joinsJson = jsonEncode(contextAnalysis['joins'] ?? []);
-    final unionsJson = jsonEncode(contextAnalysis['unions'] ?? []);
-    final valueTransformations = jsonEncode(contextAnalysis['value_transformations'] ?? []);
-    final domainContext = contextAnalysis['domain_context'] ?? '';
-    
-    contextInfo = '''
+    }
+
+    if (contextAnalysis != null) {
+      final relevantTables =
+          contextAnalysis['relevant_tables']?.join(', ') ?? '';
+      final relevantColumnsJson = jsonEncode(
+        contextAnalysis['relevant_columns'] ?? {},
+      );
+      final joinsJson = jsonEncode(contextAnalysis['joins'] ?? []);
+      final unionsJson = jsonEncode(contextAnalysis['unions'] ?? []);
+      final valueTransformations = jsonEncode(
+        contextAnalysis['value_transformations'] ?? [],
+      );
+      final domainContext = contextAnalysis['domain_context'] ?? '';
+
+      contextInfo = '''
       Domain context: $domainContext
       
       Most relevant tables for this query: $relevantTables
@@ -191,14 +197,14 @@ class GeminiFlashService {
       
       Value transformations: $valueTransformations
     ''';
-  }
+    }
 
-  final payload = {
-    'contents': [
-      {
-        'parts': [
-          {
-            'text': '''
+    final payload = {
+      'contents': [
+        {
+          'parts': [
+            {
+              'text': '''
                 You are an advanced SQL expert specializing in BigQuery Standard SQL. Generate a comprehensive SQL query that fully answers the user's question by combining data from multiple tables when needed.
 
                 User question: $englishQuestion
@@ -238,13 +244,13 @@ class GeminiFlashService {
                 - Focus on producing a complete, non-NULL result set even if it requires sophisticated SQL techniques
                 - For numeric conversions, use SAFE_CAST and REGEXP_EXTRACT to handle potential formatting issues
                 - For rating fields in particular, use a pattern like: AVG(SAFE_CAST(REGEXP_REPLACE(field, r'[^0-9.]', '') AS NUMERIC)) where the field might contain non-numeric characters
-              '''
-          },
-        ],
-      },
-    ],
-    'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
-  };
+              ''',
+            },
+          ],
+        },
+      ],
+      'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
+    };
 
     final response = await _restService.post(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
@@ -289,7 +295,7 @@ class GeminiFlashService {
                    - For each visualization, explain what columns to use and why this visualization is appropriate
                    - Consider charts like line charts for time series, bar charts for comparisons, scatter plots for relationships, etc.
                 4. Data quality observations: Note any potential issues with the data (missing values, outliers, etc.)
-              '''
+              ''',
             },
           ],
         },
@@ -316,17 +322,11 @@ class GeminiFlashService {
         'contents': [
           {
             'parts': [
-              {
-                'text': prompt
-              },
+              {'text': prompt},
             ],
           },
         ],
-        'generationConfig': {
-          'temperature': 0.2,
-          'topP': 0.8,
-          'topK': 40
-        },
+        'generationConfig': {'temperature': 0.2, 'topP': 0.8, 'topK': 40},
       };
 
       // Utilizza gemini-2.0-flash invece di gemini-pro per mantenere coerenza con gli altri metodi
@@ -374,10 +374,10 @@ class GeminiFlashService {
       Respond ONLY with the suggested path in the format /folder/subfolder/ without adding the filename.
       If new folders need to be created, briefly explain why.
       ''';
-      
+
       // Get response from LLM
       final response = await generateText(prompt);
-      
+
       // Extract the path from the response
       return _extractPathFromResponse(response);
     } catch (e) {
@@ -385,16 +385,16 @@ class GeminiFlashService {
       throw Exception('Failed to suggest file path: $e');
     }
   }
-  
+
   /// Extract a path from LLM response
   String _extractPathFromResponse(String response) {
     // Look for a pattern that resembles a path
     final RegExp pathRegex = RegExp(r'\/[a-zA-Z0-9_\-\/]+\/?');
     final match = pathRegex.firstMatch(response);
-    
+
     if (match != null) {
       String path = match.group(0) ?? '';
-      
+
       // Ensure the path starts with / and ends with /
       if (!path.startsWith('/')) {
         path = '/$path';
@@ -402,16 +402,16 @@ class GeminiFlashService {
       if (!path.endsWith('/')) {
         path = '$path/';
       }
-      
+
       return path;
     }
-    
+
     // If no path pattern is found, extract the first line as a suggestion
     final firstLine = response.split('\n').first.trim();
     if (firstLine.isNotEmpty) {
       return firstLine.startsWith('/') ? firstLine : '/$firstLine';
     }
-    
+
     return '/'; // Default: root of the bucket
   }
 }

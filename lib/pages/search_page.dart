@@ -37,9 +37,8 @@ class _SearchPageState extends State<SearchPage> {
   PlatformFile? _selectedFile;
   String? _suggestedPath;
   String _bucketStructure = '';
-  
+
   // Additional metadata for LLM
-  Map<String, String> _additionalMetadata = {};
   final List<String> _availableTags = [
     'HR Data',
     'Financial',
@@ -49,7 +48,7 @@ class _SearchPageState extends State<SearchPage> {
     'Operational',
     'Transactional',
     'Product',
-    'Inventory'
+    'Inventory',
   ];
 
   final List<String> _availableDataCategories = [
@@ -60,13 +59,15 @@ class _SearchPageState extends State<SearchPage> {
     'External',
     'Internal',
     'Reference',
-    'Master'
+    'Master',
   ];
-  
+
   final List<String> _selectedTags = [];
   String? _selectedDataCategory;
   String? _dataDescription;
-  final TextEditingController _dataDescriptionController = TextEditingController();
+  final TextEditingController _dataDescriptionController =
+      TextEditingController();
+  bool _needsRefresh = false;
   // --- End State for Upload Dialog ---
 
   @override
@@ -217,12 +218,13 @@ class _SearchPageState extends State<SearchPage> {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => ResultPage(
-            question: question,
-            sqlQuery: cleanedSqlQuery,
-            results: results,
-            analysis: analysis,
-          ),
+          builder:
+              (context) => ResultPage(
+                question: question,
+                sqlQuery: cleanedSqlQuery,
+                results: results,
+                analysis: analysis,
+              ),
         ),
       );
     } catch (e) {
@@ -262,14 +264,17 @@ class _SearchPageState extends State<SearchPage> {
             _suggestedPath = null; // Reset suggested path
             // Populate file name with original name
             _fileNameController.text = file.name;
-            log('File selected: ${file.name}, size: ${file.size} bytes, type: ${file.extension}');
+            log(
+              'File selected: ${file.name}, size: ${file.size} bytes, type: ${file.extension}',
+            );
           });
-          
+
           // After selecting a file, analyze the bucket and suggest a path
           await _analyzeAndSuggestPath(dialogSetState);
         } else {
           dialogSetState(() {
-            _uploadErrorMessage = 'Invalid file. Please ensure the file contains data.';
+            _uploadErrorMessage =
+                'Invalid file. Please ensure the file contains data.';
             _selectedFile = null;
           });
         }
@@ -287,21 +292,23 @@ class _SearchPageState extends State<SearchPage> {
 
   Future<void> _analyzeAndSuggestPath(StateSetter dialogSetState) async {
     if (_selectedFile == null) return;
-    
+
     dialogSetState(() {
       _isAnalyzing = true;
       _uploadErrorMessage = '';
+      _needsRefresh = false;
     });
-    
+
     try {
       // 1. Get bucket structure
-      final bucketHierarchy = await widget.cloudStorageService.listFolderHierarchy();
+      final bucketHierarchy =
+          await widget.cloudStorageService.listFolderHierarchy();
       _bucketStructure = _formatBucketHierarchy(bucketHierarchy);
-      
+
       // 2. Analyze file content (for text/CSV files)
       String fileContent = '';
-      if (_selectedFile!.extension?.toLowerCase() == 'csv' || 
-          _selectedFile!.extension?.toLowerCase() == 'txt' || 
+      if (_selectedFile!.extension?.toLowerCase() == 'csv' ||
+          _selectedFile!.extension?.toLowerCase() == 'txt' ||
           _selectedFile!.extension?.toLowerCase() == 'json') {
         // For text files, convert bytes to string
         if (_selectedFile!.bytes != null) {
@@ -319,7 +326,7 @@ class _SearchPageState extends State<SearchPage> {
       } else {
         fileContent = 'Binary file of type ${_selectedFile!.extension}';
       }
-      
+
       // 3. Prepare metadata for LLM
       final metadataForLLM = {
         'fileName': _selectedFile!.name,
@@ -329,21 +336,20 @@ class _SearchPageState extends State<SearchPage> {
         'category': _selectedDataCategory ?? 'not specified',
         'description': _dataDescription ?? 'not specified',
       };
-      
+
       // 4. Request path suggestion from GeminiFlashService
       final suggestedPath = await widget.geminiService.suggestFilePath(
         _bucketStructure,
         metadataForLLM,
         fileContent,
       );
-      
+
       dialogSetState(() {
         _suggestedPath = suggestedPath;
         _isAnalyzing = false;
       });
-      
+
       log('Path suggested by LLM: $_suggestedPath');
-      
     } catch (e) {
       log('Error analyzing file: $e');
       dialogSetState(() {
@@ -352,17 +358,17 @@ class _SearchPageState extends State<SearchPage> {
       });
     }
   }
-  
+
   String _formatBucketHierarchy(Map<String, List<String>> hierarchy) {
     StringBuffer buffer = StringBuffer();
-    
+
     hierarchy.forEach((folder, files) {
       buffer.writeln('/$folder/');
       for (var file in files) {
         buffer.writeln('  - $file');
       }
     });
-    
+
     return buffer.toString();
   }
 
@@ -383,7 +389,7 @@ class _SearchPageState extends State<SearchPage> {
       });
       return;
     }
-    
+
     // If no path suggested, request one
     if (_suggestedPath == null) {
       await _analyzeAndSuggestPath(dialogSetState);
@@ -402,24 +408,32 @@ class _SearchPageState extends State<SearchPage> {
 
     try {
       // Use provided name or original name
-      final fileName = _fileNameController.text.isEmpty ? 
-                       _selectedFile!.name : 
-                       _fileNameController.text;
-      
+      final fileName =
+          _fileNameController.text.isEmpty
+              ? _selectedFile!.name
+              : _fileNameController.text;
+
       // Ensure filename includes original extension
       String finalFileName = fileName;
-      if (_selectedFile!.extension != null && !finalFileName.toLowerCase().endsWith('.${_selectedFile!.extension!.toLowerCase()}')) {
+      if (_selectedFile!.extension != null &&
+          !finalFileName.toLowerCase().endsWith(
+            '.${_selectedFile!.extension!.toLowerCase()}',
+          )) {
         finalFileName = '$finalFileName.${_selectedFile!.extension}';
       }
-      
+
       // Complete path is suggested path + filename
       String fullPath = _suggestedPath!;
       final fileBytes = _selectedFile!.bytes!;
-      
-      // Determine content type based on extension
-      String? contentType = _getContentTypeFromExtension(_selectedFile!.extension);
 
-      log('Attempting to upload ${_selectedFile!.name} to bronze bucket at path: $fullPath$finalFileName');
+      // Determine content type based on extension
+      String? contentType = _getContentTypeFromExtension(
+        _selectedFile!.extension,
+      );
+
+      log(
+        'Attempting to upload ${_selectedFile!.name} to bronze bucket at path: $fullPath$finalFileName',
+      );
 
       final url = await widget.cloudStorageService.uploadFile(
         fileName: '$fullPath$finalFileName',
@@ -427,7 +441,9 @@ class _SearchPageState extends State<SearchPage> {
         contentType: contentType,
       );
 
-      log('Upload completed successfully to bronze bucket. File available at: $url');
+      log(
+        'Upload completed successfully to bronze bucket. File available at: $url',
+      );
 
       if (Navigator.canPop(dialogContext)) {
         Navigator.pop(dialogContext);
@@ -462,7 +478,8 @@ class _SearchPageState extends State<SearchPage> {
     } catch (e) {
       log('Error uploading file: $e', error: e);
       dialogSetState(() {
-        _uploadErrorMessage = 'Upload failed: ${e.toString().replaceFirst('Exception: ', '')}';
+        _uploadErrorMessage =
+            'Upload failed: ${e.toString().replaceFirst('Exception: ', '')}';
       });
     } finally {
       if (mounted) {
@@ -472,10 +489,10 @@ class _SearchPageState extends State<SearchPage> {
       }
     }
   }
-  
+
   String? _getContentTypeFromExtension(String? extension) {
     if (extension == null) return null;
-    
+
     final Map<String, String> contentTypes = {
       'csv': 'text/csv',
       'txt': 'text/plain',
@@ -487,14 +504,24 @@ class _SearchPageState extends State<SearchPage> {
       'gif': 'image/gif',
       'zip': 'application/zip',
       'doc': 'application/msword',
-      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'docx':
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'xls': 'application/vnd.ms-excel',
-      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'xlsx':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'ppt': 'application/vnd.ms-powerpoint',
-      'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'pptx':
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     };
-    
+
     return contentTypes[extension.toLowerCase()] ?? 'application/octet-stream';
+  }
+
+  void _markMetadataChanged(StateSetter dialogSetState) {
+    dialogSetState(() {
+      _needsRefresh = true;
+      _suggestedPath = null; // Clear the suggested path when metadata changes
+    });
   }
 
   void _showUploadDialog() async {
@@ -508,6 +535,7 @@ class _SearchPageState extends State<SearchPage> {
     _selectedTags.clear();
     _selectedDataCategory = null;
     _dataDescription = null;
+    _needsRefresh = false;
 
     if (!mounted) return;
 
@@ -540,7 +568,7 @@ class _SearchPageState extends State<SearchPage> {
                   const Icon(Icons.cloud_upload, color: accentColor),
                   const SizedBox(width: 10),
                   const Text(
-                    'Intelligent Upload to Bronze Bucket',
+                    'Intelligent Upload to Google Cloud Storage',
                     style: TextStyle(color: textColor),
                   ),
                   const Spacer(),
@@ -575,11 +603,12 @@ class _SearchPageState extends State<SearchPage> {
                             ),
                             icon: const Icon(Icons.attach_file, size: 18),
                             label: const Text('Select File'),
-                            onPressed: (_isUploading || _isAnalyzing)
-                                ? null
-                                : () async {
-                                    await _pickFile(dialogSetState);
-                                  },
+                            onPressed:
+                                (_isUploading || _isAnalyzing)
+                                    ? null
+                                    : () async {
+                                      await _pickFile(dialogSetState);
+                                    },
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -594,7 +623,7 @@ class _SearchPageState extends State<SearchPage> {
                         ],
                       ),
                       const SizedBox(height: 20),
-                      
+
                       // File Name Input (optional)
                       TextField(
                         controller: _fileNameController,
@@ -609,7 +638,9 @@ class _SearchPageState extends State<SearchPage> {
                           fillColor: inputFillColor,
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: inputBorderColor),
+                            borderSide: const BorderSide(
+                              color: inputBorderColor,
+                            ),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
@@ -621,18 +652,27 @@ class _SearchPageState extends State<SearchPage> {
                         ),
                       ),
                       const SizedBox(height: 15),
-                      
+
                       // Metadata Section Title
                       const Text(
-                        'Optional Metadata',
+                        'Additional Information',
                         style: TextStyle(
                           color: textColor,
                           fontWeight: FontWeight.bold,
                           fontSize: 16,
                         ),
                       ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'These details are used only to suggest a more accurate file path and will not be stored',
+                        style: TextStyle(
+                          color: hintColor,
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
                       const SizedBox(height: 10),
-                      
+
                       // Category Dropdown
                       DropdownButtonFormField<String>(
                         decoration: InputDecoration(
@@ -642,7 +682,9 @@ class _SearchPageState extends State<SearchPage> {
                           fillColor: inputFillColor,
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: inputBorderColor),
+                            borderSide: const BorderSide(
+                              color: inputBorderColor,
+                            ),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
@@ -651,32 +693,34 @@ class _SearchPageState extends State<SearchPage> {
                         ),
                         dropdownColor: inputFillColor,
                         value: _selectedDataCategory,
-                        onChanged: (_isUploading || _isAnalyzing) 
-                            ? null 
-                            : (String? newValue) {
-                                dialogSetState(() {
-                                  _selectedDataCategory = newValue;
-                                  // Reanalyze after changing metadata
-                                  if (_selectedFile != null) {
-                                    _analyzeAndSuggestPath(dialogSetState);
-                                  }
-                                });
-                              },
-                        items: [null, ..._availableDataCategories]
-                            .map<DropdownMenuItem<String>>((String? value) {
-                          return DropdownMenuItem<String>(
-                            value: value,
-                            child: Text(
-                              value ?? 'Select a category',
-                              style: TextStyle(
-                                color: value == null ? hintColor : textColor,
-                              ),
-                            ),
-                          );
-                        }).toList(),
+                        onChanged:
+                            (_isUploading || _isAnalyzing)
+                                ? null
+                                : (String? newValue) {
+                                  dialogSetState(() {
+                                    _selectedDataCategory = newValue;
+                                    _markMetadataChanged(dialogSetState);
+                                  });
+                                },
+                        items:
+                            [
+                              null,
+                              ..._availableDataCategories,
+                            ].map<DropdownMenuItem<String>>((String? value) {
+                              return DropdownMenuItem<String>(
+                                value: value,
+                                child: Text(
+                                  value ?? 'Select a category',
+                                  style: TextStyle(
+                                    color:
+                                        value == null ? hintColor : textColor,
+                                  ),
+                                ),
+                              );
+                            }).toList(),
                       ),
                       const SizedBox(height: 15),
-                      
+
                       // Description TextField
                       TextField(
                         controller: _dataDescriptionController,
@@ -685,10 +729,7 @@ class _SearchPageState extends State<SearchPage> {
                         maxLines: 2,
                         onChanged: (value) {
                           _dataDescription = value;
-                          // Reanalyze if description changes
-                          if (_selectedFile != null && value.isNotEmpty) {
-                            _analyzeAndSuggestPath(dialogSetState);
-                          }
+                          _markMetadataChanged(dialogSetState);
                         },
                         decoration: InputDecoration(
                           labelText: 'Description',
@@ -699,7 +740,9 @@ class _SearchPageState extends State<SearchPage> {
                           fillColor: inputFillColor,
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: inputBorderColor),
+                            borderSide: const BorderSide(
+                              color: inputBorderColor,
+                            ),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
@@ -711,7 +754,7 @@ class _SearchPageState extends State<SearchPage> {
                         ),
                       ),
                       const SizedBox(height: 15),
-                      
+
                       // Tags
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -724,41 +767,47 @@ class _SearchPageState extends State<SearchPage> {
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
-                            children: _availableTags.map((tag) {
-                              final isSelected = _selectedTags.contains(tag);
-                              return FilterChip(
-                                label: Text(
-                                  tag,
-                                  style: TextStyle(
-                                    color: isSelected ? Colors.black : textColor,
-                                  ),
-                                ),
-                                selected: isSelected,
-                                onSelected: (_isUploading || _isAnalyzing)
-                                    ? null
-                                    : (bool selected) {
-                                        dialogSetState(() {
-                                          if (selected) {
-                                            _selectedTags.add(tag);
-                                          } else {
-                                            _selectedTags.remove(tag);
-                                          }
-                                          // Reanalyze after changing tags
-                                          if (_selectedFile != null) {
-                                            _analyzeAndSuggestPath(dialogSetState);
-                                          }
-                                        });
-                                      },
-                                backgroundColor: chipBackgroundColor,
-                                selectedColor: accentColor,
-                                checkmarkColor: Colors.black,
-                              );
-                            }).toList(),
+                            children:
+                                _availableTags.map((tag) {
+                                  final isSelected = _selectedTags.contains(
+                                    tag,
+                                  );
+                                  return FilterChip(
+                                    label: Text(
+                                      tag,
+                                      style: TextStyle(
+                                        color:
+                                            isSelected
+                                                ? Colors.black
+                                                : textColor,
+                                      ),
+                                    ),
+                                    selected: isSelected,
+                                    onSelected:
+                                        (_isUploading || _isAnalyzing)
+                                            ? null
+                                            : (bool selected) {
+                                              dialogSetState(() {
+                                                if (selected) {
+                                                  _selectedTags.add(tag);
+                                                } else {
+                                                  _selectedTags.remove(tag);
+                                                }
+                                                _markMetadataChanged(
+                                                  dialogSetState,
+                                                );
+                                              });
+                                            },
+                                    backgroundColor: chipBackgroundColor,
+                                    selectedColor: accentColor,
+                                    checkmarkColor: Colors.black,
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
                       const SizedBox(height: 20),
-                      
+
                       // Suggested Path Display
                       if (_suggestedPath != null)
                         Container(
@@ -788,7 +837,7 @@ class _SearchPageState extends State<SearchPage> {
                             ],
                           ),
                         ),
-                      
+
                       // Progress & Error Indicators
                       if (_isUploading)
                         const Padding(
@@ -824,9 +873,10 @@ class _SearchPageState extends State<SearchPage> {
                 TextButton(
                   style: TextButton.styleFrom(foregroundColor: hintColor),
                   child: const Text('Cancel'),
-                  onPressed: (_isUploading || _isAnalyzing)
-                      ? null
-                      : () => Navigator.of(dialogContext).pop(),
+                  onPressed:
+                      (_isUploading || _isAnalyzing)
+                          ? null
+                          : () => Navigator.of(dialogContext).pop(),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
@@ -837,24 +887,27 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                     disabledBackgroundColor: secondaryButtonColor,
                   ),
-                  onPressed: (_isUploading || _isAnalyzing || _selectedFile == null)
-                      ? null
-                      : () async {
-                          await _uploadFile(
-                            dialogSetState,
-                            dialogContext,
-                          );
-                        },
-                  child: _isUploading
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: buttonTextColor,
-                          ),
-                        )
-                      : const Text('Upload'),
+                  onPressed:
+                      (_isUploading || _isAnalyzing || _selectedFile == null)
+                          ? null
+                          : () async {
+                            if (_needsRefresh) {
+                              await _analyzeAndSuggestPath(dialogSetState);
+                            } else {
+                              await _uploadFile(dialogSetState, dialogContext);
+                            }
+                          },
+                  child:
+                      _isUploading
+                          ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: buttonTextColor,
+                            ),
+                          )
+                          : Text(_needsRefresh ? 'Refresh' : 'Upload'),
                 ),
               ],
             );
@@ -902,7 +955,7 @@ class _SearchPageState extends State<SearchPage> {
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
-                  
+
                   // Card with search box
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 900),
@@ -941,12 +994,13 @@ class _SearchPageState extends State<SearchPage> {
                               maxLines: 3,
                               minLines: 1,
                               textInputAction: TextInputAction.done,
-                              onSubmitted: (_) => _processQuestion(
-                                _questionController.text,
-                              ),
+                              onSubmitted:
+                                  (_) => _processQuestion(
+                                    _questionController.text,
+                                  ),
                             ),
                             const SizedBox(height: 12),
-                            
+
                             // Row for Buttons
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -955,17 +1009,17 @@ class _SearchPageState extends State<SearchPage> {
                                 IconButton(
                                   icon: const Icon(Icons.upload_file),
                                   color: Colors.white70,
-                                  tooltip: 'Upload CSV to BigQuery',
-                                  onPressed: _isLoading
-                                      ? null
-                                      : _showUploadDialog,
+                                  tooltip: 'Upload to GCS',
+                                  onPressed:
+                                      _isLoading ? null : _showUploadDialog,
                                 ),
                                 // Send Button
                                 ElevatedButton(
-                                  onPressed: _isLoading ||
-                                          _questionController.text.isEmpty
-                                      ? null
-                                      : () => _processQuestion(
+                                  onPressed:
+                                      _isLoading ||
+                                              _questionController.text.isEmpty
+                                          ? null
+                                          : () => _processQuestion(
                                             _questionController.text,
                                           ),
                                   style: ElevatedButton.styleFrom(
@@ -986,21 +1040,22 @@ class _SearchPageState extends State<SearchPage> {
                                     disabledBackgroundColor:
                                         Colors.grey.shade800,
                                   ),
-                                  child: _isLoading &&
-                                          _currentExecutingQuery == null
-                                      ? const SizedBox(
-                                          height: 20,
-                                          width: 20,
-                                          child: CircularProgressIndicator(
+                                  child:
+                                      _isLoading &&
+                                              _currentExecutingQuery == null
+                                          ? const SizedBox(
+                                            height: 20,
+                                            width: 20,
+                                            child: CircularProgressIndicator(
+                                              color: Colors.black,
+                                              strokeWidth: 3,
+                                            ),
+                                          )
+                                          : const Icon(
+                                            Icons.send,
+                                            size: 20,
                                             color: Colors.black,
-                                            strokeWidth: 3,
                                           ),
-                                        )
-                                      : const Icon(
-                                          Icons.send,
-                                          size: 20,
-                                          color: Colors.black,
-                                        ),
                                 ),
                               ],
                             ),
