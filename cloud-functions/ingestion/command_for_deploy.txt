@@ -1,0 +1,11 @@
+gcloud functions deploy gcs-bronze-metadata-extractor \
+    --runtime python311 \
+    --trigger-resource bronze-layer-bucket \
+    --trigger-event google.storage.object.finalize \
+    --entry-point gcs_metadata_extractor \
+    --source ./cloud-functions/ingestion/ \
+    --region europe-central2 \
+    --project soy-transducer-456512-t0 \
+    --service-account gcf-metadata-ingestor@soy-transducer-456512-t0.iam.gserviceaccount.com \
+    --set-env-vars GCP_PROJECT=soy-transducer-456512-t0,BIGQUERY_DATASET_ID=metadata_store,BIGQUERY_TABLE_ID=bronze_file_metadata \
+    --timeout 120s
