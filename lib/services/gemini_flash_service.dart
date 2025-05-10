@@ -226,7 +226,7 @@ class GeminiFlashService {
 
                 Use the following guidelines:
                 1. Generate only the SQL query without any explanations.
-                2. Use backticks (`) around column names with spaces to avoid errors (even in aggregating operations eg., SELECT AVG(`gross income`))
+                2. Use backticks (`) around column names with spaces to avoid errors (even in aggregating operations eg., SELECT AVG(`gross income`)).
                 3. Use `SELECT *` only when necessary.
                 4. Join tables when needed to retrieve all relevant data in a single query.
                 5. Use UNION operations when appropriate to combine similar data from different tables.
@@ -243,9 +243,12 @@ class GeminiFlashService {
                 16. When working with text data in joins, normalize the strings by removing special characters or converting case.
                 17. When converting string values to numeric types, always use a SAFE_CAST or a combination of REGEXP_EXTRACT and CAST to extract only numeric parts.
                 18. For rating fields, assume they may contain non-numeric characters. Use REGEXP_EXTRACT and SAFE_CAST combination.
+                19. For date fields, use DATE or TIMESTAMP functions to ensure proper formatting.
+                20. Always use backticks (`) around SQL reserved words when used as column names (e.g., `end`, `start`, `date`, `timestamp`, `time`, `user`, etc.) to avoid syntax errors, even operations like (end - start) should be (`end` - `start`).
                 
                 IMPORTANT: 
                 - Find the most effective way to join tables based on semantic relationships, not just exact key matches
+                - Always limit the number of rows returned to avoid performance issues, use LIMIT clause selecting an appropriate number of rows with an upper bound of 500 rows
                 - Use CASE statements or other conditional logic in JOIN conditions when necessary
                 - For columns that appear to have NULL values after joining, use creative approaches to extract meaningful data
                 - Focus on producing a complete, non-NULL result set even if it requires sophisticated SQL techniques
