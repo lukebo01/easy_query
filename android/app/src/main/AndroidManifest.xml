@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Aggiungi questi permessi -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" /> <!-- Per Android 13+ -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" /> <!-- Per Android 13+ -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" /> <!-- Per Android 13+ -->
+    
+    <!-- ...resto del file... -->
+</manifest>

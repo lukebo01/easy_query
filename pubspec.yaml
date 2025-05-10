@@ -17,11 +17,13 @@ dependencies:
   fl_chart: ^0.70.2
   flutter_app_icons: ^0.1.1
   flutter_dotenv: ^5.2.1
-  file_picker: ^8.0.6 # Added for file selection
-  csv: ^6.0.0        # Added for CSV parsing
-  path_provider: ^2.1.1
+  file_picker: ^8.0.6
+  csv: ^6.0.0        
+  path_provider: ^2.0.15
   share_plus: ^7.2.1
-  url_launcher: ^6.1.14
+  url_launcher: ^6.1.12
+  permission_handler: ^11.0.0
+  universal_html: ^2.2.4
 
 dev_dependencies:
   flutter_test:

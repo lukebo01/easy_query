@@ -5,10 +5,13 @@ import 'dart:math' as math;
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:path_provider/path_provider.dart';
-import 'dart:io';
+import 'dart:convert';
+import 'dart:io' if (dart.library.html) 'dart:html';
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:universal_html/html.dart' as webhtml;
 
 class ResultPage extends StatefulWidget {
   final String question;
@@ -60,7 +63,20 @@ class _ResultPageState extends State<ResultPage>
     'showAvgLine': false,
     'normalizeValues': false,
     'colorScheme': 'default',
+    // Nuove opzioni per migliorare la visualizzazione
+    'enhancedSpacing': true,       // Aumenta la spaziatura tra gli elementi
+    'smartLabels': true,           // Etichette intelligenti per evitare sovrapposizioni
+    'maxDisplayedLabels': 10,      // Numero massimo di etichette da mostrare sull'asse X
+    'labelAngle': 45.0,            // Angolo di rotazione per le etichette dell'asse X
+    'enableZoom': true,            // Attiva lo zoom
+    'zoomLevel': 1.0,              // Livello di zoom iniziale
   };
+  
+  // Per lo zoom e la panoramica
+  double _zoomLevel = 1.0;
+  Offset _panOffset = Offset.zero;
+  bool _isPanning = false;
+  final TransformationController _transformController = TransformationController();
   
   // Statistics for current dataset
   Map<String, dynamic> _statistics = {};
@@ -542,7 +558,7 @@ class _ResultPageState extends State<ResultPage>
 
     return Column(
       children: [
-        // Top settings panel
+        // Top settings panel rimane invariato
         Container(
           padding: const EdgeInsets.all(12.0),
           color: Colors.grey[900],
@@ -631,7 +647,25 @@ class _ResultPageState extends State<ResultPage>
           ),
         ),
         
-        // Chart display area - MIGLIORATO PER SCROLLING ORIZZONTALE
+        // Guida rapida per l'utente
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+          color: Colors.blue.withOpacity(0.1),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, color: Colors.blue[200], size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Tip: Pinch/spread to zoom, drag to pan. Double-tap to reset. Tap on data points for details.',
+                  style: TextStyle(color: Colors.blue[100], fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // Chart display area migliorata con zoom
         Expanded(
           child: Container(
             padding: const EdgeInsets.all(12.0),
@@ -642,31 +676,163 @@ class _ResultPageState extends State<ResultPage>
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    // Calcola la larghezza minima necessaria per il grafico
-                    final double minChartWidth = _calculateChartWidth();
-                    final double chartWidth = math.max(minChartWidth, constraints.maxWidth);
-                    
-                    return SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SizedBox(
-                        width: chartWidth,
-                        height: constraints.maxHeight,
-                        child: RepaintBoundary(
-                          key: _chartKey,
-                          child: _buildChart(),
-                        ),
-                      ),
-                    );
+                padding: const EdgeInsets.all(8.0),
+                child: InteractiveViewer(
+                  transformationController: _transformController,
+                  minScale: 0.5,
+                  maxScale: 4.0,
+                  onInteractionEnd: (details) {
+                    setState(() {
+                      _zoomLevel = _transformController.value.getMaxScaleOnAxis();
+                      _chartOptions['zoomLevel'] = _zoomLevel;
+                    });
                   },
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      // Calcola la larghezza minima necessaria per il grafico
+                      final double minChartWidth = _calculateChartWidth();
+                      final double chartWidth = math.max(minChartWidth * 1.2, constraints.maxWidth);
+                      
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: chartWidth,
+                          height: constraints.maxHeight,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Expanded(
+                                child: RepaintBoundary(
+                                  key: _chartKey,
+                                  child: Stack(
+                                    children: [
+                                      _buildChart(),
+                                      if (_chartOptions['enableZoom'] == true && _zoomLevel > 1.0)
+                                        Positioned(
+                                          right: 16,
+                                          bottom: 16,
+                                          child: FloatingActionButton.small(
+                                            backgroundColor: Colors.grey[800],
+                                            onPressed: _resetZoom,
+                                            child: const Icon(Icons.zoom_out_map, size: 18),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              
+                              // Aggiungi una legenda sotto il grafico per migliorare la leggibilità
+                              if (_shouldShowLegend())
+                                Container(
+                                  height: 50,
+                                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                                  child: _buildChartLegend(),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
           ),
         ),
       ],
+    );
+  }
+  
+  void _resetZoom() {
+    setState(() {
+      _transformController.value = Matrix4.identity();
+      _zoomLevel = 1.0;
+      _chartOptions['zoomLevel'] = _zoomLevel;
+    });
+  }
+  
+  bool _shouldShowLegend() {
+    // Mostra la legenda solo per alcuni tipi di grafici
+    return ['Bar', 'Line', 'Pie', 'Radar'].contains(_selectedChartType);
+  }
+  
+  Widget _buildChartLegend() {
+    // Caso specifico per i grafici a torta
+    if (_selectedChartType == 'Pie') {
+      return _buildPieLegend();
+    }
+    
+    // Legenda generica per altri tipi di grafici
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: _filteredResults.take(10).map((data) {
+          final labelValue = data[_selectedXAxis]?.toString() ?? '';
+          final color = _graphicsService.defaultColors[
+            _filteredResults.indexOf(data) % _graphicsService.defaultColors.length
+          ];
+          
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: Row(
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  labelValue.length > 15 ? '${labelValue.substring(0, 12)}...' : labelValue,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+  
+  Widget _buildPieLegend() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: _filteredResults.take(10).map((data) {
+          final labelValue = data[_selectedXAxis]?.toString() ?? '';
+          final numericValue = double.tryParse(data[_selectedYAxis]?.toString() ?? '0') ?? 0;
+          final color = _graphicsService.defaultColors[
+            _filteredResults.indexOf(data) % _graphicsService.defaultColors.length
+          ];
+          
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: Row(
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '${labelValue.length > 10 ? '${labelValue.substring(0, 7)}...' : labelValue}: ${numericValue.toStringAsFixed(1)}',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
     );
   }
   
@@ -1589,18 +1755,10 @@ class _ResultPageState extends State<ResultPage>
                   ),
                   const SizedBox(height: 16),
                   _buildStatRow('Count', _statistics['count']?.toString() ?? '0'),
-                  _buildStatRow('Minimum', _formatNumber(_statistics['min'])),
-                  _buildStatRow('Maximum', _formatNumber(_statistics['max'])),
-                  _buildStatRow('Range', _formatNumber(_statistics['range'])),
+                  _buildStatRow('Min', _formatNumber(_statistics['min'])),
+                  _buildStatRow('Max', _formatNumber(_statistics['max'])),
                   _buildStatRow('Mean', _formatNumber(_statistics['mean'])),
                   _buildStatRow('Median', _formatNumber(_statistics['median'])),
-                  _buildStatRow('Standard Deviation', _formatNumber(_statistics['stdDev'])),
-                  _buildStatRow('Lower Quartile (Q1)', _formatNumber(_statistics['lowerQuartile'])),
-                  _buildStatRow('Upper Quartile (Q3)', _formatNumber(_statistics['upperQuartile'])),
-                  
-                  const SizedBox(height: 24),
-                  
-                  // Add a mini histogram or box plot here if desired
                 ],
               ),
             ),
@@ -1624,45 +1782,55 @@ class _ResultPageState extends State<ResultPage>
         children: [
           Text(
             label,
-            style: const TextStyle(color: Colors.white),
+            style: const TextStyle(color: Colors.white70, fontSize: 14),
           ),
           Text(
             value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-            ),
+            style: const TextStyle(color: Colors.white, fontSize: 14),
           ),
         ],
       ),
     );
   }
   
-  void _showCellDetails(String column, String value) {
+  // Metodi per la condivisione e l'esportazione dei risultati
+  
+  void _showShareOptionsDialog() {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
           backgroundColor: Colors.grey[900],
-          title: Text(
-            column,
-            style: const TextStyle(color: Colors.white),
+          title: const Text(
+            'Share Results',
+            style: TextStyle(color: Colors.white),
           ),
-          content: SelectableText(
-            value,
-            style: const TextStyle(color: Colors.white),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.share, color: Colors.white),
+                title: const Text('Share via App', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _shareResults();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.file_download, color: Colors.white),
+                title: const Text('Export as File', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showExportOptionsDialog();
+                },
+              ),
+            ],
           ),
           actions: [
             TextButton(
-              child: const Text('Close'),
+              child: const Text('Close', style: TextStyle(color: Colors.white)),
               onPressed: () => Navigator.pop(context),
-            ),
-            TextButton(
-              child: const Text('Copy'),
-              onPressed: () {
-                _copyToClipboard(value);
-                Navigator.pop(context);
-              },
             ),
           ],
         );
@@ -1670,6 +1838,178 @@ class _ResultPageState extends State<ResultPage>
     );
   }
   
+  void _shareResults() {
+    // Condividi i risultati filtrati come testo
+    final filteredData = _filteredResults
+        .map((row) => row.values.map((v) => v.toString()).join(','))
+        .join('\n');
+    
+    Share.share(
+      'Query: ${widget.question}\n\nResults:\n$filteredData',
+      subject: 'Query Results',
+    );
+  }
+  
+  void _showExportOptionsDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text(
+            'Export Options',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.image, color: Colors.white),
+                title: const Text('Chart as Image', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _exportChartAsImage();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.table_chart, color: Colors.white),
+                title: const Text('Data as CSV', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _exportDataAsCsv();
+                },
+              ),
+              ListTile(
+                // Sostituisci Icons.json con un'icona esistente
+                leading: const Icon(Icons.code, color: Colors.white),
+                title: const Text('Data as JSON', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _exportDataAsJson();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.analytics, color: Colors.white),
+                title: const Text('Analysis as Text', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _exportAnalysis();
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              child: const Text('Close', style: TextStyle(color: Colors.white)),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Esportazione del grafico come immagine con permessi
+  Future<void> _exportChartAsImage() async {
+    try {
+      final imageData = await _captureChartAsImage();
+      if (imageData == null) {
+        _showSnackBar('Impossibile catturare l\'immagine');
+        return;
+      }
+      
+      final fileName = 'easy_query_chart_${DateTime.now().millisecondsSinceEpoch}.png';
+      
+      // Per web, usa downloadFile per il download
+      _downloadData(imageData, fileName, 'image/png');
+      _showSnackBar('Immagine salvata come $fileName');
+    } catch (e) {
+      _showSnackBar('Errore durante l\'esportazione: $e');
+    }
+  }
+
+  // Versione corretta per web di _exportDataAsCsv
+  Future<void> _exportDataAsCsv() async {
+    try {
+      final rows = _filteredResults;
+      if (rows.isEmpty) {
+        _showSnackBar('Nessun dato da esportare');
+        return;
+      }
+      
+      final fileName = 'easy_query_data_${DateTime.now().millisecondsSinceEpoch}.csv';
+      final header = rows.first.keys.join(',');
+      final dataRows = rows.map((row) => 
+        row.values.map((v) => '"${v.toString().replaceAll('"', '""')}"').join(',')
+      ).join('\n');
+      
+      final csvData = '$header\n$dataRows';
+      
+      // Per web, usa downloadFile per il download
+      _downloadData(utf8.encode(csvData), fileName, 'text/csv');
+      _showSnackBar('Dati salvati come $fileName');
+    } catch (e) {
+      _showSnackBar('Errore durante l\'esportazione: $e');
+    }
+  }
+
+  // Versione corretta per web di _exportDataAsJson
+  Future<void> _exportDataAsJson() async {
+    try {
+      if (_filteredResults.isEmpty) {
+        _showSnackBar('Nessun dato da esportare');
+        return;
+      }
+      
+      final fileName = 'easy_query_data_${DateTime.now().millisecondsSinceEpoch}.json';
+      final jsonData = jsonEncode(_filteredResults);
+      
+      // Per web, usa downloadFile per il download
+      _downloadData(utf8.encode(jsonData), fileName, 'application/json');
+      _showSnackBar('Dati JSON salvati come $fileName');
+    } catch (e) {
+      _showSnackBar('Errore durante l\'esportazione: $e');
+    }
+  }
+
+  // Versione corretta per web di _exportAnalysis
+  Future<void> _exportAnalysis() async {
+    try {
+      final fileName = 'easy_query_analysis_${DateTime.now().millisecondsSinceEpoch}.txt';
+      final analysisText = 'Query: ${widget.question}\n\n'
+          'SQL: ${widget.sqlQuery}\n\n'
+          'Analysis:\n${widget.analysis}';
+      
+      // Per web, usa downloadFile per il download
+      _downloadData(utf8.encode(analysisText), fileName, 'text/plain');
+      _showSnackBar('Analisi salvata come $fileName');
+    } catch (e) {
+      _showSnackBar('Errore durante l\'esportazione: $e');
+    }
+  }
+
+  // Nuovo metodo unificato per download (sostituisce _downloadStringForWeb e _downloadBytesForWeb)
+  void _downloadData(List<int> bytes, String fileName, String mimeType) {
+    // Usa universal_html per maggiore compatibilità
+    final blob = webhtml.Blob([bytes], mimeType);
+    final url = webhtml.Url.createObjectUrlFromBlob(blob);
+    
+    // Crea un elemento <a> invisibile per scaricare il file
+    final anchor = webhtml.AnchorElement(href: url)
+      ..setAttribute('download', fileName)
+      ..style.display = 'none';
+    
+    // Aggiungi alla pagina, clicca e rimuovi
+    webhtml.document.body?.children.add(anchor);
+    anchor.click();
+    
+    // Pulizia
+    webhtml.document.body?.children.remove(anchor);
+    webhtml.Url.revokeObjectUrl(url);
+  }
+
+  // Implementazione di _showHelpDialog
   void _showHelpDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -1702,10 +2042,11 @@ class _ResultPageState extends State<ResultPage>
                 _helpSection(
                   'Interacting with Charts',
                   [
-                    'Hover or tap data points to see detailed values',
+                    'Pinch or use mousewheel to zoom in/out',
+                    'Drag to pan across the chart',
+                    'Double-tap to reset the view',
+                    'Tap data points to see detailed values',
                     'Use the filter panel to focus on specific ranges',
-                    'Try different chart types for new insights',
-                    'Adjust chart options for better visualization',
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -1732,7 +2073,8 @@ class _ResultPageState extends State<ResultPage>
       },
     );
   }
-  
+
+  // Implementazione di _helpSection (usato da _showHelpDialog)
   Widget _helpSection(String title, List<String> items) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1764,9 +2106,54 @@ class _ResultPageState extends State<ResultPage>
       ],
     );
   }
-  
-  // Helper methods
-  
+
+  // Implementazione di _copyToClipboard
+  void _copyToClipboard(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Copied to clipboard'),
+        duration: const Duration(seconds: 2),
+        backgroundColor: Colors.green,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  // Implementazione di _showCellDetails
+  void _showCellDetails(String column, String value) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text(
+            column,
+            style: const TextStyle(color: Colors.white),
+          ),
+          content: SelectableText(
+            value,
+            style: const TextStyle(color: Colors.white),
+          ),
+          actions: [
+            TextButton(
+              child: const Text('Close'),
+              onPressed: () => Navigator.pop(context),
+            ),
+            TextButton(
+              child: const Text('Copy'),
+              onPressed: () {
+                _copyToClipboard(value);
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Implementazione di _updateFieldSelectionForChartType
   void _updateFieldSelectionForChartType() {
     if (_selectedChartType == 'Radar') {
       // Pre-select numeric fields for radar chart
@@ -1796,259 +2183,7 @@ class _ResultPageState extends State<ResultPage>
     }
   }
 
-  // Cattura il grafico come immagine
-  Future<Uint8List?> _captureChartAsImage() async {
-    try {
-      RenderRepaintBoundary boundary = _chartKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      
-      if (byteData != null) {
-        return byteData.buffer.asUint8List();
-      }
-      return null;
-    } catch (e) {
-      _showSnackBar('Failed to capture chart: $e');
-      return null;
-    }
-  }
-
-  // Esportazione del grafico come immagine
-  Future<void> _exportChartAsImage() async {
-    final imageData = await _captureChartAsImage();
-    if (imageData == null) {
-      _showSnackBar('Failed to capture chart image');
-      return;
-    }
-    
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/chart_${DateTime.now().millisecondsSinceEpoch}.png');
-      await tempFile.writeAsBytes(imageData);
-      
-      _showSnackBar('Chart exported to: ${tempFile.path}');
-      
-      // Su un dispositivo reale, potremmo voler aprire il file con un intent
-      // o salvarlo nella galleria
-    } catch (e) {
-      _showSnackBar('Error saving image: $e');
-    }
-  }
-
-  // Esportazione dei dati come CSV
-  Future<void> _exportDataAsCsv() async {
-    try {
-      final rows = _filteredResults;
-      if (rows.isEmpty) {
-        _showSnackBar('No data to export');
-        return;
-      }
-      
-      final header = rows.first.keys.join(',');
-      final dataRows = rows.map((row) => 
-        row.values.map((v) => '"${v.toString().replaceAll('"', '""')}"').join(',')
-      ).join('\n');
-      
-      final csvData = '$header\n$dataRows';
-      
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/data_${DateTime.now().millisecondsSinceEpoch}.csv');
-      await tempFile.writeAsString(csvData);
-      
-      _showSnackBar('Data exported to: ${tempFile.path}');
-    } catch (e) {
-      _showSnackBar('Error exporting data: $e');
-    }
-  }
-
-  // Nuovo metodo per esportare i dati in formato JSON
-  Future<void> _exportDataAsJson() async {
-    try {
-      if (_filteredResults.isEmpty) {
-        _showSnackBar('No data to export');
-        return;
-      }
-      
-      // Converti i dati in formato JSON
-      final jsonString = '[';
-      final rows = _filteredResults.map((row) {
-        final entries = row.entries.map((e) => '"${e.key}": "${e.value.toString().replaceAll('"', '\\"')}"').join(', ');
-        return '{$entries}';
-      }).join(',\n');
-      final jsonData = '$jsonString\n$rows\n]';
-      
-      // Salva il file JSON
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/data_${DateTime.now().millisecondsSinceEpoch}.json');
-      await tempFile.writeAsString(jsonData);
-      
-      _showSnackBar('Data exported as JSON to: ${tempFile.path}');
-    } catch (e) {
-      _showSnackBar('Error exporting data: $e');
-    }
-  }
-
-  // Nuovo metodo per esportare un report completo
-  Future<void> _exportCompleteReport() async {
-    try {
-      // Prepara il testo del report
-      final report = StringBuffer();
-      report.writeln('# DATA ANALYSIS REPORT');
-      report.writeln('## Question');
-      report.writeln(widget.question);
-      report.writeln('\n## SQL Query');
-      report.writeln(widget.sqlQuery);
-      report.writeln('\n## Analysis');
-      report.writeln(widget.analysis);
-      report.writeln('\n## Data Summary');
-      report.writeln('Total rows: ${_filteredResults.length}');
-      
-      if (_statistics.isNotEmpty) {
-        report.writeln('\n## Statistics');
-        _statistics.forEach((key, value) {
-          report.writeln('$key: ${_formatNumber(value)}');
-        });
-      }
-      
-      // Salva il report come file di testo
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/report_${DateTime.now().millisecondsSinceEpoch}.txt');
-      await tempFile.writeAsString(report.toString());
-      
-      // Salva anche l'immagine del grafico se siamo nella tab del grafico
-      String? imageFilePath;
-      if (_tabController.index == 1) {
-        final imageData = await _captureChartAsImage();
-        if (imageData != null) {
-          final imageFile = File('${tempDir.path}/chart_${DateTime.now().millisecondsSinceEpoch}.png');
-          await imageFile.writeAsBytes(imageData);
-          imageFilePath = imageFile.path;
-        }
-      }
-      
-      _showSnackBar('Report exported to: ${tempFile.path}');
-      
-      // Opzione per condividere il report completo
-      if (imageFilePath != null) {
-        await Share.shareXFiles(
-          [XFile(tempFile.path), XFile(imageFilePath)],
-          text: 'Data Analysis Report',
-        );
-      } else {
-        await Share.shareXFiles(
-          [XFile(tempFile.path)],
-          text: 'Data Analysis Report',
-        );
-      }
-    } catch (e) {
-      _showSnackBar('Error creating complete report: $e');
-    }
-  }
-
-  // Funzione per condividere il grafico
-  Future<void> _shareChart() async {
-    final imageData = await _captureChartAsImage();
-    if (imageData == null) {
-      _showSnackBar('Failed to capture chart image');
-      return;
-    }
-    
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/chart_${DateTime.now().millisecondsSinceEpoch}.png');
-      await tempFile.writeAsBytes(imageData);
-      
-      // Condividi usando share_plus
-      await Share.shareXFiles(
-        [XFile(tempFile.path)],
-        text: 'Chart for query: ${widget.question}',
-        subject: 'Data Analysis Chart',
-      );
-    } catch (e) {
-      _showSnackBar('Error sharing chart: $e');
-    }
-  }
-
-  // Funzione per condividere l'analisi
-  Future<void> _shareAnalysis() async {
-    final analysisText = 'Query: ${widget.question}\n\n'
-        'SQL: ${widget.sqlQuery}\n\n'
-        'Analysis:\n${widget.analysis}';
-    
-    try {
-      await Share.share(
-        analysisText,
-        subject: 'Data Analysis Results',
-      );
-    } catch (e) {
-      _showSnackBar('Error sharing analysis: $e');
-    }
-  }
-
-  // Funzione per condividere i risultati dei dati
-  Future<void> _shareDataResults() async {
-    try {
-      final rows = _filteredResults;
-      if (rows.isEmpty) {
-        _showSnackBar('No data to share');
-        return;
-      }
-      
-      final header = rows.first.keys.join(',');
-      final dataRows = rows.map((row) => 
-        row.values.map((v) => '"${v.toString().replaceAll('"', '""')}"').join(',')
-      ).join('\n');
-      
-      final csvData = '$header\n$dataRows';
-      
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/data_${DateTime.now().millisecondsSinceEpoch}.csv');
-      await tempFile.writeAsString(csvData);
-      
-      // Condividi usando share_plus
-      await Share.shareXFiles(
-        [XFile(tempFile.path)],
-        text: 'Data results for query: ${widget.question}',
-        subject: 'Data Analysis Results',
-      );
-    } catch (e) {
-      _showSnackBar('Error sharing data: $e');
-    }
-  }
-
-  // Funzione per esportare l'analisi
-  Future<void> _exportAnalysis() async {
-    final analysisText = 'Query: ${widget.question}\n\n'
-        'SQL: ${widget.sqlQuery}\n\n'
-        'Analysis:\n${widget.analysis}';
-        
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/analysis_${DateTime.now().millisecondsSinceEpoch}.txt');
-      await tempFile.writeAsString(analysisText);
-      
-      _showSnackBar('Analysis exported to: ${tempFile.path}');
-    } catch (e) {
-      _showSnackBar('Error exporting analysis: $e');
-    }
-  }
-
-  // Funzioni helper
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
-    _showSnackBar('Copied to clipboard');
-  }
-  
-  // Calcola la larghezza necessaria in base al tipo di grafico e ai dati
+  // Implementazione di _calculateChartWidth
   double _calculateChartWidth() {
     // Aumenta la larghezza minima del grafico per tipi che richiedono più spazio
     switch (_selectedChartType) {
@@ -2079,177 +2214,64 @@ class _ResultPageState extends State<ResultPage>
     }
   }
 
-  // Aggiungiamo l'implementazione della funzione mancante
-  void _showExportOptionsDialog() {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Colors.grey[900],
-          title: const Text(
-            'Export Options',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Opzione per esportare il grafico (solo se nella tab corrispondente)
-              if (_tabController.index == 1)
-                ListTile(
-                  leading: const Icon(Icons.image, color: Colors.blue),
-                  title: const Text('Export Chart as Image', style: TextStyle(color: Colors.white)),
-                  subtitle: const Text('Save as PNG file', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _exportChartAsImage();
-                  },
-                ),
-              
-              // Opzioni per esportare i dati
-              ListTile(
-                leading: const Icon(Icons.table_chart, color: Colors.green),
-                title: const Text('Export Data as CSV', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Compatible with Excel, Sheets', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _exportDataAsCsv();
-                },
-              ),
-              
-              ListTile(
-                leading: const Icon(Icons.code, color: Colors.amber),
-                title: const Text('Export Data as JSON', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('For developers and APIs', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _exportDataAsJson();
-                },
-              ),
-              
-              // Opzioni per esportare l'analisi
-              ListTile(
-                leading: const Icon(Icons.analytics, color: Colors.purple),
-                title: const Text('Export Analysis', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Text file with insights', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _exportAnalysis();
-                },
-              ),
-              
-              // Opzione per esportare tutto
-              ListTile(
-                leading: const Icon(Icons.download_done, color: Colors.orange),
-                title: const Text('Export Complete Report', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('All data, charts and analysis', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _exportCompleteReport();
-                },
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () => Navigator.pop(context),
-            ),
-          ],
-        );
-      },
+  // Implementazione di _captureChartAsImage
+  Future<Uint8List?> _captureChartAsImage() async {
+    try {
+      final boundary = _chartKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      final image = await boundary.toImage(pixelRatio: 3.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      
+      if (byteData != null) {
+        return byteData.buffer.asUint8List();
+      }
+      return null;
+    } catch (e) {
+      _showSnackBar('Failed to capture chart: $e');
+      return null;
+    }
+  }
+
+  // Implementazione di _shareAnalysis
+  Future<void> _shareAnalysis() async {
+    final analysisText = 'Query: ${widget.question}\n\n'
+        'SQL: ${widget.sqlQuery}\n\n'
+        'Analysis:\n${widget.analysis}';
+    
+    try {
+      await Share.share(
+        analysisText,
+        subject: 'Data Analysis Results',
+      );
+    } catch (e) {
+      _showSnackBar('Error sharing analysis: $e');
+    }
+  }
+
+  // Helper per mostrare uno snackbar con un messaggio
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 3),
+        backgroundColor: Colors.grey[800],
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(16),
+      ),
     );
   }
 
-  void _showShareOptionsDialog() {
+  // Implementazione di _showOpenFileDialog per le piattaforme web
+  void _showOpenFileDialog(String filePath, String title) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
           backgroundColor: Colors.grey[900],
-          title: const Text(
-            'Share Options',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Opzione per condividere l'analisi
-              ListTile(
-                leading: const Icon(Icons.analytics, color: Colors.orange),
-                title: const Text('Share Analysis', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Share AI insights and findings', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _shareAnalysis();
-                },
-              ),
-              
-              // Opzione per condividere i dati
-              ListTile(
-                leading: const Icon(Icons.data_object, color: Colors.green),
-                title: const Text('Share Data Results', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('CSV format with query results', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _shareDataResults();
-                },
-              ),
-              
-              // Opzione per condividere il grafico (visibile solo nella tab del grafico)
-              if (_tabController.index == 1)
-                ListTile(
-                  leading: const Icon(Icons.insert_chart, color: Colors.blue),
-                  title: const Text('Share Current Chart', style: TextStyle(color: Colors.white)),
-                  subtitle: const Text('Image of the visualization', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _shareChart();
-                  },
-                ),
-              
-              // Opzione per condividere la query SQL
-              ListTile(
-                leading: const Icon(Icons.code, color: Colors.purple),
-                title: const Text('Share SQL Query', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('The database query used', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  Share.share(
-                    widget.sqlQuery,
-                    subject: 'SQL Query',
-                  );
-                },
-              ),
-              
-              // Opzione per condividere la domanda originale
-              ListTile(
-                leading: const Icon(Icons.help_outline, color: Colors.amber),
-                title: const Text('Share Question', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('The original data question', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  Share.share(
-                    widget.question,
-                    subject: 'Data Question',
-                  );
-                },
-              ),
-              
-              // Opzione per condividere il report completo
-              ListTile(
-                leading: const Icon(Icons.description, color: Colors.cyan),
-                title: const Text('Share Complete Report', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Question, data, analysis and charts', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                onTap: () {
-                  Navigator.pop(context);
-                  _exportCompleteReport();
-                },
-              ),
-            ],
-          ),
+          title: Text(title, style: const TextStyle(color: Colors.white)),
+          content: Text('File generato con successo!', style: const TextStyle(color: Colors.white70)),
           actions: [
             TextButton(
-              child: const Text('Cancel'),
+              child: const Text('Chiudi'),
               onPressed: () => Navigator.pop(context),
             ),
           ],
