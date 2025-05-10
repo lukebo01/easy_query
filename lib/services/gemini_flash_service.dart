@@ -76,7 +76,9 @@ class GeminiFlashService {
             4. For join conditions, don't rely only on column names but analyze the actual data to find potential foreign key relationships
             5. Consider fuzzy matching between similar values in different tables (e.g., "Electronics" in one table might correspond to "Electronic Devices" in another)
             6. Determine precise join conditions based on the actual data values, not just schema similarities
-            7. Evaluate if cloud files are needed for the query, they will trasformed in tables so suggest them ONLY IF NEEDED
+            7. Evaluate if cloud files are needed for the query considering their name, path, date and metadata; they will be trasformed in tables so suggest them ONLY IF NEEDED
+            8. Cloud file names should be written with full and correct path, including the folder structure
+            9. NEVER include file names form cloud files into the relevant tables list, use only the table names from the schemas for that scope
 
             IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
             
@@ -158,10 +160,10 @@ class GeminiFlashService {
     Map<String, List<Map<String, dynamic>>>? sampleData,
     Map<String, dynamic>? contextAnalysis,
   }) async {
-    // First translate question to English if needed
+    // -- 1: First translate question to English if needed --
     final englishQuestion = await translateToEnglish(userQuestion);
 
-    // Build a more comprehensive prompt with context information
+    // -- 2: Build a more comprehensive prompt with context information --
     String contextInfo = '';
     String sampleDataInfo = '';
 
@@ -203,7 +205,7 @@ class GeminiFlashService {
       Value transformations: $valueTransformations
     ''';
     }
-
+    // -- 3: Build the final prompt for SQL generation --
     final payload = {
       'contents': [
         {

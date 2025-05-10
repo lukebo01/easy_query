@@ -112,58 +112,71 @@ class _SearchPageState extends State<SearchPage> {
         throw Exception("No datasets found in the project. Cannot proceed.");
       }
 
-      final targetDataset = datasets[0];
-      final tables = await widget.bigQueryService.getTables(targetDataset);
+      // Recupera tutte le tabelle dei dataset di destinazione (bigquery e silver)
+      final Map<String, List<String>> datasetTablesMap = {};
+      for (var dataset in datasets) {
+        if (dataset != 'metadata_store') {
+          // Escludi il dataset "metadata_store"
+          final tables = await widget.bigQueryService.getTables(dataset);
+          datasetTablesMap[dataset] = tables;
+        }
+      }
 
-      log('List of tables in $targetDataset: $tables');
+      log('Dataset to tables mapping: $datasetTablesMap');
 
       // Recupera lo schema delle tabelle
       List schemas = [];
       List<String> tableNames = []; // Store fully qualified names here
       Map<String, List<Map<String, dynamic>>> sampleData = {};
 
-      for (var table in tables) {
-        try {
-          final schema = await widget.bigQueryService.getTableSchema(
-            targetDataset, // Nome del dataset
-            table, // Nome della tabella
-          );
-          schemas.add(schema);
-
-          // Formato nome tabella completo
-          final fullTableName = '$projectId.$targetDataset.$table';
-          tableNames.add(fullTableName);
-
-          print(
-            'Schema for table $fullTableName: ${jsonEncode(schema).toString()}',
-          );
-
-          // Ottieni un campione di dati da ogni tabella (limitato a 15 record casuali)
+      await Future.forEach(datasetTablesMap.entries, (entry) async {
+        final targetDataset = entry.key;
+        final tables = entry.value;
+        for (var table in tables) {
           try {
-            final sampleQuery =
-                "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
-            final tableSample = await widget.bigQueryService.executeQuery(
-              sampleQuery,
+            final schema = await widget.bigQueryService.getTableSchema(
+              targetDataset, // Nome del dataset
+              table, // Nome della tabella
             );
-            sampleData[fullTableName] = tableSample;
+            schemas.add(schema);
+
+            // Formato nome tabella completo
+            final fullTableName = '$projectId.$targetDataset.$table';
+            tableNames.add(fullTableName);
+
+            print(
+              'Schema for table $fullTableName: ${jsonEncode(schema).toString()}',
+            );
+
+            // Ottieni un campione di dati da ogni tabella (limitato a 15 record casuali)
+            try {
+              final sampleQuery =
+                  "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
+              final tableSample = await widget.bigQueryService.executeQuery(
+                sampleQuery,
+              );
+              sampleData[fullTableName] = tableSample;
+            } catch (e) {
+              log(
+                'Warning: Failed to get sample data from $fullTableName. Error: $e',
+              );
+            }
           } catch (e) {
             log(
-              'Warning: Failed to get sample data from $fullTableName. Error: $e',
+              'Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e',
             );
           }
-        } catch (e) {
-          log(
-            'Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e',
-          );
         }
-      }
+      });
 
       log('Table schemas fetched: ${schemas.length}');
       log('Sample data fetched from ${sampleData.length} tables');
 
       // Recupera i file caricati nel bucket bronze
-      final cloudFilesTree = await widget.cloudStorageService.getAllFilesTree();
-      log('Files in bucket: $cloudFilesTree');
+      final cloudFilesMetadata =
+          await widget.bigQueryService.getBronzeMetadata();
+
+      log('Cloud files metadata: ${jsonEncode(cloudFilesMetadata)}');
 
       // Analisi del contesto per identificare tabelle rilevanti
       setState(() {
@@ -173,17 +186,32 @@ class _SearchPageState extends State<SearchPage> {
       final contextAnalysis = await widget.geminiService.analyzeQueryContext(
         question,
         jsonEncode(schemas),
-        cloudFilesTree,
+        jsonEncode(cloudFilesMetadata),
         tableNames,
         sampleData,
       );
 
       log('Context analysis: ${jsonEncode(contextAnalysis)}');
 
+      // Verifica se sono stati trovati file bronze da trasformare
+      if (contextAnalysis['suggested_files'] != null &&
+          contextAnalysis['suggested_files'].isNotEmpty) {
+        log(
+          "Suggested files for transformation: ${contextAnalysis['suggested_files']}",
+        );
+        // TODO: Trasforma i file suggeriti
+      }
+
+      // Aggiungi i file bronze trasformati al contesto
+      // TODO: bisogna aggiungere le tabelle trasformate in 'tableNames' (con nome completo) e i rispettivi schemas in 'schemas'
+
       // Genera query SQL con contesto arricchito
       setState(() {
         _currentExecutingQuery = 'Building optimized query...';
       });
+
+      // Rimuovi i suggested files dal contesto in quanto sono stati già trasformati
+      contextAnalysis.remove('suggested_files');
 
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
@@ -923,7 +951,6 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   // --- End Intelligent File Upload Methods ---
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
