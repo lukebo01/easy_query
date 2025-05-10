@@ -9,3 +9,6 @@ gcloud functions deploy gcs-bronze-metadata-extractor \
     --service-account gcf-metadata-ingestor@soy-transducer-456512-t0.iam.gserviceaccount.com \
     --set-env-vars GCP_PROJECT=soy-transducer-456512-t0,BIGQUERY_DATASET_ID=metadata_store,BIGQUERY_TABLE_ID=bronze_file_metadata \
     --timeout 120s
+
+
+ATTENZIONE: SOLO PER LINUX
