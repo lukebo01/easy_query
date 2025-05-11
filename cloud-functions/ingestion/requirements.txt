@@ -1,2 +1,23 @@
-functions-framework>=3.0.0
-google-cloud-bigquery>=3.0.0
+# Framework per Cloud Functions
+functions-framework==3.5.0
+
+# Client Google Cloud
+google-cloud-bigquery>=3.13.0    # Aggiornata per buona misura, controlla l'ultima
+google-cloud-storage>=2.16.0
+google-cloud-vision>=3.7.0      # <-- LIBRERIA MANCANTE AGGIUNTA
+google-cloud-documentai>=2.26.0 # Già presente, ma la tua funzione corrente non la usa
+google-cloud-language>=2.13.3   # Già presente, ma la tua funzione corrente non la usa
+
+# Per elaborazione PDF e Immagini
+PyPDF2>=3.0.1
+Pillow>=9.5.0                   # Pillow è usato per Image.open
+
+# Dipendenze di base dei client Google Cloud (spesso installate automaticamente, ma non fa male specificarle)
+google-api-core>=2.11.0
+google-auth>=2.17.3
+google-auth-oauthlib # Non ha un numero di versione fisso spesso, si adatta
+google-cloud-core>=2.3.2
+google-crc32c # Solitamente per GCS
+
+# Altre dipendenze che potresti aver avuto da altri file
+requests==2.31.0

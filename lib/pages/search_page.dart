@@ -6,6 +6,7 @@ import 'package:easy_query/services/gemini_flash_service.dart';
 import 'package:easy_query/services/big_query_service.dart';
 import 'package:easy_query/pages/result_page.dart';
 import 'package:easy_query/services/cloud_storage_service.dart';
+import 'package:easy_query/services/data_orchestration_service.dart';
 
 class SearchPage extends StatefulWidget {
   final GeminiFlashService geminiService;
@@ -125,7 +126,7 @@ class _SearchPageState extends State<SearchPage> {
       log('Dataset to tables mapping: $datasetTablesMap');
 
       // Recupera lo schema delle tabelle
-      List schemas = [];
+      List<Map<String, dynamic>> schemas = []; // Modifica: definisci come lista di Map<String, dynamic>
       List<String> tableNames = []; // Store fully qualified names here
       Map<String, List<Map<String, dynamic>>> sampleData = {};
 
@@ -134,18 +135,21 @@ class _SearchPageState extends State<SearchPage> {
         final tables = entry.value;
         for (var table in tables) {
           try {
-            final schema = await widget.bigQueryService.getTableSchema(
+            final schemaJson = await widget.bigQueryService.getTableSchema(
               targetDataset, // Nome del dataset
               table, // Nome della tabella
             );
-            schemas.add(schema);
+            
+            // Modificato: decodifica la stringa JSON in Map
+            final Map<String, dynamic> schemaMap = jsonDecode(schemaJson);
+            schemas.add(schemaMap);
 
             // Formato nome tabella completo
             final fullTableName = '$projectId.$targetDataset.$table';
             tableNames.add(fullTableName);
 
             print(
-              'Schema for table $fullTableName: ${jsonEncode(schema).toString()}',
+              'Schema for table $fullTableName: ${jsonEncode(schemaMap)}',
             );
 
             // Ottieni un campione di dati da ogni tabella (limitato a 15 record casuali)
@@ -177,46 +181,44 @@ class _SearchPageState extends State<SearchPage> {
           await widget.bigQueryService.getBronzeMetadata();
 
       log('Cloud files metadata: ${jsonEncode(cloudFilesMetadata)}');
-
-      // Analisi del contesto per identificare tabelle rilevanti
+      
+      // NUOVO: Utilizzo del servizio di orchestrazione dati
       setState(() {
-        _currentExecutingQuery = 'Analyzing dataset context...';
+        _currentExecutingQuery = 'Orchestrating data transformations...';
       });
-
-      final contextAnalysis = await widget.geminiService.analyzeQueryContext(
+      
+      // Crea il servizio di orchestrazione
+      final dataOrchestrationService = DataOrchestrationService(
+        geminiService: widget.geminiService,
+        bigQueryService: widget.bigQueryService,
+        cloudStorageService: widget.cloudStorageService,
+        bronzeToSilverUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/bronze-to-silver',
+        silverToGoldUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
+      );
+      
+      // Esegui l'orchestrazione dei dati
+      // Nota: non è più necessario fare il cast qui poiché schemas è già una List<Map<String, dynamic>>
+      final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
         question,
-        jsonEncode(schemas),
-        jsonEncode(cloudFilesMetadata),
+        schemas,  // Ora è già nel formato corretto
         tableNames,
         sampleData,
+        cloudFilesMetadata,
       );
-
-      log('Context analysis: ${jsonEncode(contextAnalysis)}');
-
-      // Verifica se sono stati trovati file bronze da trasformare
-      if (contextAnalysis['suggested_files'] != null &&
-          contextAnalysis['suggested_files'].isNotEmpty) {
-        log(
-          "Suggested files for transformation: ${contextAnalysis['suggested_files']}",
-        );
-        // TODO: Trasforma i file suggeriti
-      }
-
-      // Aggiungi i file bronze trasformati al contesto
-      // TODO: bisogna aggiungere le tabelle trasformate in 'tableNames' (con nome completo) e i rispettivi schemas in 'schemas'
-
-      // Genera query SQL con contesto arricchito
+      
+      // Usa i risultati dell'orchestrazione
+      final contextAnalysis = orchestrationResult['contextAnalysis'];
+      final updatedSchemas = orchestrationResult['updatedSchemas'];
+      final updatedTableNames = orchestrationResult['updatedTableNames'];
+      
       setState(() {
         _currentExecutingQuery = 'Building optimized query...';
       });
 
-      // Rimuovi i suggested files dal contesto in quanto sono stati già trasformati
-      contextAnalysis.remove('suggested_files');
-
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
-        jsonEncode(schemas),
-        jsonEncode(tableNames),
+        jsonEncode(updatedSchemas),
+        jsonEncode(updatedTableNames),
         sampleData: sampleData,
         contextAnalysis: contextAnalysis,
       );
@@ -241,6 +243,10 @@ class _SearchPageState extends State<SearchPage> {
         cleanedSqlQuery,
       );
       log('Query Results: ${jsonEncode(results)}');
+
+      setState(() {
+        _currentExecutingQuery = 'Analyzing query results...';
+      });
 
       final analysis = await widget.geminiService.analyzeQueryResults(
         cleanedSqlQuery,

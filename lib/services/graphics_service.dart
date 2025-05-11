@@ -35,33 +35,40 @@ class GraphicsService {
       0, 
       (sum, value) => sum + math.pow(value - mean, 2)
     );
-    final stdDev = math.sqrt(sumSquaredDiffs / values.length);
+    final variance = sumSquaredDiffs / values.length;
+    final stdDev = math.sqrt(variance);
     
     // Calcola mediana
-    final median = values.length.isOdd 
-        ? sortedValues[values.length ~/ 2] 
-        : (sortedValues[values.length ~/ 2 - 1] + sortedValues[values.length ~/ 2]) / 2;
+    double median;
+    if (values.length % 2 == 0) {
+      median = (sortedValues[values.length ~/ 2 - 1] + sortedValues[values.length ~/ 2]) / 2;
+    } else {
+      median = sortedValues[values.length ~/ 2];
+    }
     
     // Calcola quartili
-    final lowerQuartileIndex = (values.length / 4).round() - 1;
-    final upperQuartileIndex = (3 * values.length / 4).round() - 1;
-    final lowerQuartile = lowerQuartileIndex >= 0 ? sortedValues[lowerQuartileIndex] : sortedValues.first;
-    final upperQuartile = upperQuartileIndex < sortedValues.length ? sortedValues[upperQuartileIndex] : sortedValues.last;
+    final q1Index = (values.length * 0.25).round() - 1;
+    final q3Index = (values.length * 0.75).round() - 1;
+    final q1 = q1Index >= 0 ? sortedValues[q1Index] : sortedValues[0];
+    final q3 = q3Index < sortedValues.length ? sortedValues[q3Index] : sortedValues.last;
     
-    // Calcola min, max
+    // Calcola min, max, range
     final min = sortedValues.first;
     final max = sortedValues.last;
+    final range = max - min;
     
     return {
-      'mean': mean,
-      'median': median,
-      'stdDev': stdDev,
+      'count': values.length,
       'min': min,
       'max': max,
-      'lowerQuartile': lowerQuartile,
-      'upperQuartile': upperQuartile,
-      'range': max - min,
-      'count': values.length,
+      'range': range,
+      'mean': mean,
+      'median': median,
+      'variance': variance,
+      'stdDev': stdDev,
+      'q1': q1,
+      'q3': q3,
+      'iqr': q3 - q1,
     };
   }
 
