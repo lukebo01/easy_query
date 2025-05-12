@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:developer' as dev;
 import 'package:easy_query/services/rest_service.dart';
 
 class GeminiFlashService {
@@ -153,217 +152,161 @@ class GeminiFlashService {
     throw Exception('Failed to analyze query context');
   }
 
+  /// Generate a SQL query based on the user's question and database schema
   Future<String> generateSqlQuery(
     String userQuestion,
     String databaseSchema,
-    String tableName, {
+    String tableNames, {
     Map<String, List<Map<String, dynamic>>>? sampleData,
     Map<String, dynamic>? contextAnalysis,
   }) async {
-    // -- 1: First translate question to English if needed --
-    final englishQuestion = await translateToEnglish(userQuestion);
-
-    // -- 2: Build a more comprehensive prompt with context information --
-    String contextInfo = '';
-    String sampleDataInfo = '';
-
-    if (sampleData != null) {
-      // Provide a small sample of data from each table to help with join logic
-      final sampleDataPreview = <String, List<Map<String, dynamic>>>{};
-      sampleData.forEach((key, value) {
-        sampleDataPreview[key] = value.length > 3 ? value.sublist(0, 3) : value;
-      });
-      sampleDataInfo = '''
-      Sample data preview: ${jsonEncode(sampleDataPreview)}
-    ''';
-    }
-
-    if (contextAnalysis != null) {
-      final relevantTables =
-          contextAnalysis['relevant_tables']?.join(', ') ?? '';
-      final relevantColumnsJson = jsonEncode(
-        contextAnalysis['relevant_columns'] ?? {},
-      );
-      final joinsJson = jsonEncode(contextAnalysis['joins'] ?? []);
-      final unionsJson = jsonEncode(contextAnalysis['unions'] ?? []);
-      final valueTransformations = jsonEncode(
-        contextAnalysis['value_transformations'] ?? [],
-      );
-      final domainContext = contextAnalysis['domain_context'] ?? '';
-
-      contextInfo = '''
-      Domain context: $domainContext
-      
-      Most relevant tables for this query: $relevantTables
-      
-      Relevant columns per table: $relevantColumnsJson
-      
-      Suggested joins: $joinsJson
-      
-      Suggested unions: $unionsJson
-      
-      Value transformations: $valueTransformations
-
-      IMPORTANT:
-      - If querying a table that you know is partitioned by a column (e.g., 'date_partition'),
-        you MUST include a filter on that partition column in the WHERE clause to ensure query efficiency.
-        For example: WHERE date_partition = '2025/05/12' OR date_partition >= '2025/01/01'.
-        If the user query implies a date range, use it. Otherwise, consider a recent range or ask for clarification.
-    ''';
-    }
-    // -- 3: Build the final prompt for SQL generation --
     final payload = {
       'contents': [
         {
           'parts': [
             {
               'text': '''
-                You are an advanced SQL expert specializing in BigQuery Standard SQL. Generate a comprehensive SQL query that fully answers the user's question by combining data from multiple tables when needed.
+            You are a SQL expert tasked with generating a BigQuery SQL query based on a user question.
+            
+            User question: $userQuestion
 
-                User question: $englishQuestion
+            Database schemas: $databaseSchema
+            
+            Table names: $tableNames
+            
+            ${sampleData != null ? 'Sample data: ${jsonEncode(sampleData)}' : ''}
+            
+            ${contextAnalysis != null ? 'Context analysis: ${jsonEncode(contextAnalysis)}' : ''}
+            
+            IMPORTANT INSTRUCTIONS FOR DATE HANDLING:
+            1. When filtering on a date_partition field that is stored as STRING in format 'YYYY/MM/DD', 
+               ALWAYS use PARSE_DATE('%Y/%m/%d', date_partition) to convert it to a DATE before comparison.
+            2. NEVER compare STRING date_partition directly with DATE functions like CURRENT_DATE() or DATE_SUB().
+            3. CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
+            4. INCORRECT EXAMPLE: WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
+            
+            Generate a single SQL query that answers the user's question.
+            Ensure that your query:
+            1. Uses only tables that exist in the provided schema
+            2. References columns that are present in those tables
+            3. Follows best practices for performance, including limiting result size when appropriate
+            4. Uses proper table name qualification with project and dataset IDs
+            5. Uses LEFT JOINs when appropriate to avoid losing data
+            6. Uses the proper syntax for BigQuery SQL
+            7. Applies appropriate filtering conditions based on the user's question
+            8. ALWAYS use PARSE_DATE('%Y/%m/%d', date_partition) when comparing date_partition fields with DATE types
+            
+            Return only the SQL query without any additional explanation or markdown formatting.
 
-                Database schemas: $databaseSchema
 
-                Tables names: $tableName
+            IMPORTANT INSTRUCTIONS FOR SQL GENERATION (MANDATORY FOR ALL QUERIES):
 
-                $contextInfo
-                
-                $sampleDataInfo
+            1.  MANDATORY PARTITION FILTER:
+                IF you query any table that includes 'date_partition' in its schema 
+                (like `soy-transducer-456512-t0.silver_zone.silver_data_files_it_document_text_file` 
+                or any table in the `silver_zone` dataset that is similarly structured),
+                YOU ABSOLUTELY MUST INCLUDE A WHERE CLAUSE THAT FILTERS THE 'date_partition' COLUMN.
+                If the user's question does not provide a specific date or date range, 
+                you MUST query a recent and relevant range (e.g., the last 30 days from the current date) 
+                OR the latest available partition if known.
+                DO NOT generate a query for these partitioned tables without a 'date_partition' filter.
 
-                Use the following guidelines:
-                1. Generate only the SQL query without any explanations.
-                2. Use backticks (`) around column names with spaces to avoid errors (even in aggregating operations eg., SELECT AVG(`gross income`)).
-                3. Use `SELECT *` only when necessary.
-                4. Join tables when needed to retrieve all relevant data in a single query.
-                5. Use UNION operations when appropriate to combine similar data from different tables.
-                6. Never use DELETE, INSERT, or UPDATE statements.
-                7. If columns with similar meaning appear in multiple tables with different names, use aliases to standardize column names in the result set.
-                8. If a table has no direct connection to others but contains relevant data, include it in a separate subquery or use UNION.
-                9. Ensure output columns are consistently named to simplify visualization and analysis.
-                10. For date or time-related questions, use appropriate BigQuery date functions.
-                11. If possible, include simple aggregations that will be useful for visualization.
-                12. For time series data, consider including granularity that makes visualization meaningful.
-                13. Before joining tables, apply TRIM, UPPER/LOWER, or CAST functions as needed to normalize join keys.
-                14. When dealing with potentially NULL columns in joins, consider using COALESCE or IFNULL functions aggressively.
-                15. If standard joins fail to produce results, consider fuzzy matching strategies like SOUNDEX, LEVENSHTEIN distance, or substring matching.
-                16. When working with text data in joins, normalize the strings by removing special characters or converting case.
-                17. When converting string values to numeric types, always use a SAFE_CAST or a combination of REGEXP_EXTRACT and CAST to extract only numeric parts.
-                18. For rating fields, assume they may contain non-numeric characters. Use REGEXP_EXTRACT and SAFE_CAST combination.
-                19. For date fields, use DATE or TIMESTAMP functions to ensure proper formatting.
-                20. Always use backticks (`) around SQL reserved words when used as column names (e.g., `end`, `start`, `date`, `timestamp`, `time`, `user`, etc.) to avoid syntax errors, even operations like (end - start) should be (`end` - `start`).
-                
-                IMPORTANT: 
-                - Find the most effective way to join tables based on semantic relationships, not just exact key matches
-                - Always limit the number of rows returned to avoid performance issues, use LIMIT clause selecting an appropriate number of rows with an upper bound of 500 rows
-                - Use CASE statements or other conditional logic in JOIN conditions when necessary
-                - For columns that appear to have NULL values after joining, use creative approaches to extract meaningful data
-                - Focus on producing a complete, non-NULL result set even if it requires sophisticated SQL techniques
-                - For numeric conversions, use SAFE_CAST and REGEXP_EXTRACT to handle potential formatting issues
-                - For rating fields in particular, use a pattern like: AVG(SAFE_CAST(REGEXP_REPLACE(field, r'[^0-9.]', '') AS NUMERIC)) where the field might contain non-numeric characters
-              ''',
+            2.  DATE COMPARISON FOR 'date_partition' COLUMN (WHICH IS A STRING 'YYYY/MM/DD'):
+                If you filter 'date_partition' by comparing it to a DATE type value 
+                (e.g., from CURRENT_DATE(), DATE_SUB(), or a DATE literal like DATE('2023-01-01')),
+                YOU MUST EXPLICITLY CONVERT THE 'date_partition' STRING to a DATE type before the comparison.
+                USE THE FUNCTION: PARSE_DATE('%Y/%m/%d', date_partition)
+                CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+                INCORRECT EXAMPLE (THIS WILL FAIL): WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+                ALWAYS PERFORM THIS CONVERSION for date comparisons involving the 'date_partition' STRING column.
+            '''
             },
           ],
         },
-      ],
-      'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
+      ]
     };
 
     final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
       payload,
     );
 
-    // Estrarre le parti di testo restituite dal modello
     if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      return response['candidates'][0]['content']['parts'][0]['text'];
+      return response['candidates'][0]['content']['parts'][0]['text'].trim();
     }
 
     throw Exception('Failed to generate SQL query');
   }
-
-  Future<String> analyzeQueryResults(
-    String query,
-    List<Map<String, dynamic>> results,
-  ) async {
-    // Converti i risultati a stringa (limitati i primi 10 per sicurezza)
-    final resultsPreview =
-        results.length > 10 ? results.sublist(0, 10) : results;
-    final resultsStr = jsonEncode(resultsPreview);
-    final totalResults = results.length;
-
+  
+  /// Analyze query results to generate insights
+  Future<String> analyzeQueryResults(String sqlQuery, List<Map<String, dynamic>> results) async {
     final payload = {
       'contents': [
         {
           'parts': [
             {
               'text': '''
-                Analyze these query results and provide insights.
-                
-                Query: $query
-                
-                Results (${resultsPreview.length} of $totalResults rows): $resultsStr
-                
-                Provide a comprehensive analysis including:
-                
-                1. Summary of findings: Describe the overall patterns, trends, and key metrics from the data
-                2. Key insights: Identify at least 3 specific insights that can be drawn from the data
-                3. Recommended visualizations: Suggest 2-3 specific chart types that would best represent this data
-                   - For each visualization, explain what columns to use and why this visualization is appropriate
-                   - Consider charts like line charts for time series, bar charts for comparisons, scatter plots for relationships, etc.
-                4. Data quality observations: Note any potential issues with the data (missing values, outliers, etc.)
-              ''',
+            You are a data analysis expert tasked with analyzing the results of a SQL query.
+            
+            SQL Query: $sqlQuery
+            
+            Results: ${jsonEncode(results)}
+            
+            Please provide a detailed analysis of these results, including:
+            
+            1. A summary of the key findings
+            2. Interpretation of any trends, patterns, or anomalies
+            3. Actionable insights or recommendations based on the data
+            4. Any limitations of the data or analysis
+            
+            Format your analysis with clear headings and bullet points where appropriate.
+            '''
             },
           ],
         },
-      ],
-      'generationConfig': {'temperature': 0.7, 'topP': 0.95, 'topK': 40},
+      ]
     };
 
     final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
       payload,
     );
 
     if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      return response['candidates'][0]['content']['parts'][0]['text'];
+      return response['candidates'][0]['content']['parts'][0]['text'].trim();
     }
 
     throw Exception('Failed to analyze query results');
   }
-
-  /// Genera una risposta di testo generica con Gemini
+  
+  /// Generate general text based on a prompt 
   Future<String> generateText(String prompt) async {
-    try {
-      final payload = {
-        'contents': [
-          {
-            'parts': [
-              {'text': prompt},
-            ],
-          },
-        ],
-        'generationConfig': {'temperature': 0.2, 'topP': 0.8, 'topK': 40},
-      };
+    final payload = {
+      'contents': [
+        {
+          'parts': [
+            {
+              'text': prompt,
+            },
+          ],
+        },
+      ]
+    };
 
-      // Utilizza gemini-2.0-flash invece di gemini-pro per mantenere coerenza con gli altri metodi
-      final response = await _restService.post(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
-        payload,
-      );
+    final response = await _restService.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
+      payload,
+    );
 
-      if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-        return response['candidates'][0]['content']['parts'][0]['text'].trim();
-      }
-
-      throw Exception('No text in Gemini response');
-    } catch (e) {
-      dev.log('Error generating text with Gemini: $e', error: e);
-      throw Exception('Failed to generate text with Gemini: $e');
+    if (response['candidates'] != null && response['candidates'].isNotEmpty) {
+      return response['candidates'][0]['content']['parts'][0]['text'].trim();
     }
-  }
 
-  /// Analyze file content and metadata to suggest an appropriate storage path
-  Future<String> suggestFilePath(
+    throw Exception('Failed to generate text');
+  }
+  
+  /// Suggest a file path based on content analysis
+   Future<String> suggestFilePath(
     String bucketStructure,
     Map<String, dynamic> fileMetadata,
     String? fileContent,
@@ -397,7 +340,7 @@ class GeminiFlashService {
       // Extract the path from the response
       return _extractPathFromResponse(response);
     } catch (e) {
-      dev.log('Error suggesting file path: $e', error: e);
+      print('Error suggesting file path: $e');
       throw Exception('Failed to suggest file path: $e');
     }
   }

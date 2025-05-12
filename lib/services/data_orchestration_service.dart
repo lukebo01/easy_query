@@ -74,72 +74,120 @@ class DataOrchestrationService {
               dev.log("Bronze file $bronzeFileGcsUri transformed/found at Silver path: $silverPathUri");
               transformedSilverFileUris.add(silverPathUri);
               
-              // Costruisci il nome della tabella BigQuery per il file Silver
-              // Assumendo che il file Silver sia un Parquet e che il nome della tabella BQ
-              // derivi dal nome del file Parquet senza estensione, nel dataset "silver_zone".
-              // Esempio: gs://silver-bucket/path/myfile.parquet -> progetto.silver_zone.myfile
-              try {
-                final uriParts = Uri.parse(silverPathUri).pathSegments; // Es: [silver-bucket, path, myfile.parquet]
-                if (uriParts.isNotEmpty) {
-                  final silverFileNameWithExt = uriParts.last;
-                  final silverFileNameNoExt = silverFileNameWithExt.replaceAll('.parquet', '');
-                  
-                  // VERIFICA E CORREGGI QUESTO DATASET ID SE NECESSARIO
-                  const String silverDatasetId = "silver_zone"; 
-                  final String newSilverTableName = "${_bigQueryService.projectId}.$silverDatasetId.$silverFileNameNoExt";
-                  
-                  if (!finalTableNames.contains(newSilverTableName)) {
-                    finalTableNames.add(newSilverTableName);
-                    dev.log("Added new Silver table to context: $newSilverTableName");
-                  }
-
-                  // Aggiungi/Aggiorna lo schema per questa nuova tabella Silver
-                  // La risposta dalla CF Python dovrebbe contenere 'columns' se il file è stato appena processato.
-                  if (silverTransformResult['columns'] != null && silverTransformResult['columns'] is List) {
-                    final List<dynamic> columnsRaw = silverTransformResult['columns'] as List<dynamic>;
-                    if (columnsRaw.isNotEmpty) {
-                      final List<Map<String, String>> schemaFields = columnsRaw.map((col) {
-                        final String columnName = col.toString(); // Assicura che sia una stringa
-                        return {
-                          "name": columnName,
-                          "type": "STRING", // Semplificato: idealmente, dovresti derivare il tipo
-                          "mode": "NULLABLE"
-                        };
-                      }).toList();
-
-                      if (schemaFields.isNotEmpty) {
-                        // Rimuovi schema precedente se esisteva per questa tabella (per aggiornamento)
+              // Controlla se è stata creata una tabella BigQuery (nuova logica)
+              final String? bigQueryTableName = silverTransformResult['bigquery_table'] as String?;
+              if (bigQueryTableName != null && bigQueryTableName.isNotEmpty) {
+                if (!finalTableNames.contains(bigQueryTableName)) {
+                  finalTableNames.add(bigQueryTableName);
+                  dev.log("Added new Silver external table to context: $bigQueryTableName");
+                }
+                
+                // Se abbiamo informazioni sulle colonne, creiamo lo schema per il contesto
+                if (silverTransformResult['columns'] != null && silverTransformResult['columns'] is List) {
+                  final List<dynamic> columnsRaw = silverTransformResult['columns'] as List<dynamic>;
+                  if (columnsRaw.isNotEmpty) {
+                    final List<Map<String, String>> schemaFields = columnsRaw.map((col) {
+                      final String columnName = col.toString();
+                      return {
+                        "name": columnName,
+                        "type": "STRING", // Semplificato: idealmente, dovresti derivare il tipo
+                        "mode": "NULLABLE"
+                      };
+                    }).toList();
+                    
+                    if (schemaFields.isNotEmpty) {
+                      // Parse the table name to get dataset and table ID
+                      final tableNameParts = bigQueryTableName.split('.');
+                      if (tableNameParts.length == 3) {
+                        final String projectIdFromTable = tableNameParts[0];
+                        final String datasetIdFromTable = tableNameParts[1];
+                        final String tableIdFromTable = tableNameParts[2];
+                      
+                        // Rimuovi schema precedente se esisteva
                         finalSchemas.removeWhere((schema) =>
-                            schema['tableReference']?['tableId'] == silverFileNameNoExt &&
-                            schema['tableReference']?['datasetId'] == silverDatasetId);
+                            schema['tableReference']?['tableId'] == tableIdFromTable &&
+                            schema['tableReference']?['datasetId'] == datasetIdFromTable);
                         
                         finalSchemas.add({
                           "tableReference": {
-                            "projectId": _bigQueryService.projectId,
-                            "datasetId": silverDatasetId,
-                            "tableId": silverFileNameNoExt
+                            "projectId": projectIdFromTable,
+                            "datasetId": datasetIdFromTable,
+                            "tableId": tableIdFromTable
                           },
                           "schema": {
                             "fields": schemaFields
                           }
                         });
-                        dev.log("Added/Updated schema for Silver table: $newSilverTableName with ${schemaFields.length} columns.");
+                        dev.log("Added/Updated schema for Silver external table: $bigQueryTableName with ${schemaFields.length} columns.");
                       }
-                      else {
-                        dev.log("Info: 'columns' field was an empty list for $silverPathUri. Schema not added/updated for this run.");
-                      }
-                    } else {
-                      dev.log("Info: 'columns' field was an empty list for $silverPathUri. Schema not added/updated.");
                     }
-                  } else {
-                    dev.log("Info: 'columns' field not found or not a List in response for $silverPathUri (file might have been 'already processed' or processing failed to return columns). Schema not added/updated for this run. You might need to fetch schema separately if this table is new to the context.");
-                    // TODO: Se questa tabella silver è nuova al contesto e le colonne non sono state fornite,
-                    // potresti voler provare a interrogare `INFORMATION_SCHEMA.COLUMNS` di BigQuery per il suo schema
-                    // o leggere i metadati del file Parquet da GCS, se assolutamente necessario qui.
                   }
                 }
-              } catch (e, stackTrace) {
-                dev.log("Error processing silver path or schema for $silverPathUri: $e", error: e, stackTrace: stackTrace, level: 900);
+              } else {
+                // L'approccio precedente di derivare il nome della tabella dal nome del file rimane come fallback
+                try {
+                  final uriParts = Uri.parse(silverPathUri).pathSegments; // Es: [silver-bucket, path, myfile.parquet]
+                  if (uriParts.isNotEmpty) {
+                    final silverFileNameWithExt = uriParts.last;
+                    final silverFileNameNoExt = silverFileNameWithExt.replaceAll('.parquet', '');
+                    
+                    // VERIFICA E CORREGGI QUESTO DATASET ID SE NECESSARIO
+                    const String silverDatasetId = "silver_zone"; 
+                    final String newSilverTableName = "${_bigQueryService.projectId}.$silverDatasetId.$silverFileNameNoExt";
+                    
+                    if (!finalTableNames.contains(newSilverTableName)) {
+                      finalTableNames.add(newSilverTableName);
+                      dev.log("Added new Silver table to context: $newSilverTableName");
+                    }
+
+                    // Aggiungi/Aggiorna lo schema per questa nuova tabella Silver
+                    // La risposta dalla CF Python dovrebbe contenere 'columns' se il file è stato appena processato.
+                    if (silverTransformResult['columns'] != null && silverTransformResult['columns'] is List) {
+                      final List<dynamic> columnsRaw = silverTransformResult['columns'] as List<dynamic>;
+                      if (columnsRaw.isNotEmpty) {
+                        final List<Map<String, String>> schemaFields = columnsRaw.map((col) {
+                          final String columnName = col.toString(); // Assicura che sia una stringa
+                          return {
+                            "name": columnName,
+                            "type": "STRING", // Semplificato: idealmente, dovresti derivare il tipo
+                            "mode": "NULLABLE"
+                          };
+                        }).toList();
+
+                        if (schemaFields.isNotEmpty) {
+                          // Rimuovi schema precedente se esisteva per questa tabella (per aggiornamento)
+                          finalSchemas.removeWhere((schema) =>
+                              schema['tableReference']?['tableId'] == silverFileNameNoExt &&
+                              schema['tableReference']?['datasetId'] == silverDatasetId);
+                          
+                          finalSchemas.add({
+                            "tableReference": {
+                              "projectId": _bigQueryService.projectId,
+                              "datasetId": silverDatasetId,
+                              "tableId": silverFileNameNoExt
+                            },
+                            "schema": {
+                              "fields": schemaFields
+                            }
+                          });
+                          dev.log("Added/Updated schema for Silver table: $newSilverTableName with ${schemaFields.length} columns.");
+                        }
+                        else {
+                          dev.log("Info: 'columns' field was an empty list for $silverPathUri. Schema not added/updated for this run.");
+                        }
+                      } else {
+                        dev.log("Info: 'columns' field was an empty list for $silverPathUri. Schema not added/updated.");
+                      }
+                    } else {
+                      dev.log("Info: 'columns' field not found or not a List in response for $silverPathUri (file might have been 'already processed' or processing failed to return columns). Schema not added/updated for this run. You might need to fetch schema separately if this table is new to the context.");
+                      // TODO: Se questa tabella silver è nuova al contesto e le colonne non sono state fornite,
+                      // potresti voler provare a interrogare `INFORMATION_SCHEMA.COLUMNS` di BigQuery per il suo schema
+                      // o leggere i metadati del file Parquet da GCS, se assolutamente necessario qui.
+                    }
+                  }
+                } catch (e, stackTrace) {
+                  dev.log("Error processing silver path or schema for $silverPathUri: $e", error: e, stackTrace: stackTrace, level: 900);
+                }
               }
             } else {
               dev.log('Warning: Bronze-to-Silver success response for $bronzeFileGcsUri missing valid "silver_path". Result: $silverTransformResult', level: 900);
@@ -347,67 +395,112 @@ class DataOrchestrationService {
 
     String bucketName = parts.first; // Il primo elemento dovrebbe essere il nome del bucket
     List<String> objectPathSegments = parts.sublist(1).where((segment) => segment.isNotEmpty).toList(); // Rimuove segmenti vuoti (da //)
-    String objectPath = objectPathSegments.join('/'); // Ricostruisce il path dell'oggetto
-
-    // Il path finale da inviare alla Cloud Function
-    String pathForCloudFunction = '$bucketName/$objectPath';
+    String objectPath = objectPathSegments.join('/');
     
-    // Se objectPath era vuoto (es. input era "gs://bucket" o "gs://bucket/"),
-    // allora pathForCloudFunction sarà "bucket/" che è invalido per un file.
-    // La funzione Python dovrebbe comunque gestire un blob_name vuoto.
-    if (objectPath.isEmpty && parts.length > 1) { // parts.length > 1 per input come "bucket/"
-         dev.log(
-            'Warning: Object path is empty for GCS URI "$fileGcsUri". Resulting path for CF: "$pathForCloudFunction"',
-            level: 800,
-        );
-        // Potresti voler restituire null qui se un path di oggetto vuoto non è mai valido
-        // return null;
-    } else if (objectPath.isEmpty && parts.length <=1) { // input era solo "bucket" o ""
-         dev.log(
-            'Error: Path "$fileGcsUri" does not seem to contain a valid object path after bucket.',
-            level: 1000, error: 'Invalid GCS path format.',
-        );
-        return null;
-    }
-
-
-    dev.log('Calling bronze-to-silver Cloud Function with payload path: "$pathForCloudFunction"');
-
+    // Percorso completo normalizzato
+    String fullPath = '${bucketName}/${objectPath}';
+    
+    // Mappa di parametri da inviare alla Cloud Function
+    final Map<String, dynamic> requestPayload = {
+      'path': fullPath, // Bronze path normalizzato
+      'force_processing': false,
+    };
+    
     try {
+      // Effettua la chiamata HTTP alla Cloud Function
+      final uri = Uri.parse(_bronzeToSilverUrl);
       final response = await http.post(
-        Uri.parse(_bronzeToSilverUrl),
-        headers: {
-          'Content-Type': 'application/json; charset=UTF-8',
-        },
-        body: jsonEncode({
-          'path': pathForCloudFunction,
-          'force_processing': false,
-          'delete_original': false,
-        }),
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(requestPayload),
       );
-
-      dev.log('Bronze-to-Silver CF Response Status: ${response.statusCode}');
-      dev.log('Bronze-to-Silver CF Response Body: ${response.body}');
-
+      
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        try {
-          if (response.body.isNotEmpty) {
-            return jsonDecode(response.body) as Map<String, dynamic>;
-          } else {
-            dev.log('Bronze-to-Silver CF returned a 2xx status but with an empty body.', level: 800);
-            return {'status': 'success', 'message': 'Operation successful with empty response body'};
+        final Map<String, dynamic> responseData = jsonDecode(response.body);
+        
+        // Se la trasformazione è stata completata con successo
+        if (responseData['status'] == 'success') {
+          dev.log('Bronze to Silver transformation successful');
+          
+          // Controlla se abbiamo i dati per creare una tabella esterna
+          if (responseData['silver_path'] != null && responseData['columns'] != null) {
+            final String silverPathUri = responseData['silver_path'];
+            final List<dynamic> columnsRaw = responseData['columns'];
+            
+            // Solo se abbiamo sia il percorso che le colonne, creiamo una tabella esterna
+            if (silverPathUri.isNotEmpty && columnsRaw.isNotEmpty) {
+              try {
+                // Estrae il nome file dal path (senza estensione)
+                final String fileName = silverPathUri.split('/').last;
+                final String fileNameNoExt = fileName.replaceAll('.parquet', '');
+                
+                // Costruiamo un nome di tabella adatto (rimuovendo caratteri non validi)
+                final String tableId = fileNameNoExt.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_').toLowerCase();
+                
+                // Prepara lo schema per la tabella BigQuery
+                final List<Map<String, String>> schemaFields = columnsRaw.map((col) {
+                  final String columnName = col.toString();
+                  return {
+                    'name': columnName,
+                    'type': 'STRING', // Di default usiamo STRING
+                    'mode': 'NULLABLE',
+                  };
+                }).toList();
+                
+                // Crea o aggiorna la tabella esterna
+                const String silverDatasetId = "silver_zone";
+                await _bigQueryService.createOrUpdateExternalTable(
+                  silverDatasetId,
+                  tableId,
+                  silverPathUri,
+                  schemaFields,
+                );
+                
+                // Aggiunge questa informazione al risultato
+                responseData['bigquery_table'] = "${_bigQueryService.projectId}.$silverDatasetId.$tableId";
+                dev.log('Created external table: ${responseData['bigquery_table']} for $silverPathUri');
+              } catch (e, stackTrace) {
+                dev.log(
+                  'Warning: Failed to create external table for $silverPathUri: $e',
+                  error: e,
+                  stackTrace: stackTrace,
+                  level: 800,
+                );
+                // Non interrompiamo il flusso se la creazione della tabella fallisce
+              }
+            }
           }
-        } catch (e, stackTrace) {
-          dev.log('Error decoding JSON response from Bronze-to-Silver CF: $e', error: e, stackTrace: stackTrace, level: 1000);
-          return null;
+          
+          return responseData;
         }
-      } else {
-        dev.log('Error response from Bronze-to-Silver CF: ${response.statusCode} - ${response.body}', level: 1000);
-        return null;
+        
+        // Restituisci la risposta anche se lo stato non è success (potrebbe essere un errore "gestito")
+        dev.log('Bronze to Silver transformation returned non-success status: ${responseData['status']}');
+        return responseData;
       }
+      
+      // In caso di errore HTTP
+      dev.log(
+        'HTTP error calling Bronze to Silver function: ${response.statusCode} - ${response.reasonPhrase}',
+        error: response.body,
+        level: 900,
+      );
+      return {
+        'status': 'error',
+        'error': 'HTTP error: ${response.statusCode} - ${response.reasonPhrase}',
+        'details': response.body
+      };
     } catch (e, stackTrace) {
-      dev.log('Exception during HTTP call to Bronze-to-Silver CF: $e', error: e, stackTrace: stackTrace, level: 1000);
-      return null;
+      dev.log(
+        'Exception calling Bronze to Silver function: $e',
+        error: e,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
+      return {
+        'status': 'error',
+        'error': 'Exception: $e',
+      };
     }
   }
   
