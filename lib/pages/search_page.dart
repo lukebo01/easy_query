@@ -87,107 +87,139 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
+  Future<String> _getLatestAvailablePartition(
+    String datasetId, 
+    String tableId,
+    List<Map<String, dynamic>> bronzeMetadata // Passa i metadati bronze
+  ) async {
+    // Strategia 1: Prova a derivare dall'ultimo file bronze processato
+    if (bronzeMetadata.isNotEmpty) {
+      try {
+        // Ordina i metadata per metadata_ingestion_time se non già ordinati
+        // (La tua query li ordina già DESC)
+        final latestBronzeFile = bronzeMetadata.first;
+        final String? eventTimeString = latestBronzeFile['event_time'] as String?; // o metadata_ingestion_time
+        
+        if (eventTimeString != null) {
+          // Il formato dai log è "2025-05-11T20:53:20.%fZ"
+          // Dobbiamo normalizzarlo per DateTime.parse
+          final normalizedEventTime = eventTimeString.replaceFirstMapped(
+            RegExp(r'\.%f(Z?)$'), // Gestisce %f o %fZ
+            (match) => ".000${match.group(1) ?? 'Z'}" // Sostituisci con millisecondi fissi
+          );
+
+          final DateTime eventDate = DateTime.parse(normalizedEventTime);
+          final String derivedPartition = "${eventDate.year}/${eventDate.month.toString().padLeft(2, '0')}/${eventDate.day.toString().padLeft(2, '0')}";
+          log('Derived latest partition for sampling: $derivedPartition from bronze metadata');
+          return derivedPartition;
+        }
+      } catch (e) {
+        log('Could not derive partition from bronze metadata: $e');
+      }
+    }
+
+    // Strategia 2: Prova a interrogare INFORMATION_SCHEMA.PARTITIONS (più complesso, richiede permessi)
+    // Per ora, usiamo un fallback se la strategia 1 fallisce
+    // TODO: Implementare una logica di fallback migliore se necessario, 
+    //       come interrogare INFORMATION_SCHEMA.PARTITIONS per la partizione MAX.
+    //       SELECT MAX(partition_id) FROM `progetto.dataset.INFORMATION_SCHEMA.PARTITIONS` WHERE table_name = 'nome_tabella'
+
+    log('Falling back to a default recent partition for sampling (adjust if needed).');
+    // Fallback a una data recente (ESEMPIO! Adatta o rendi più dinamico)
+    final now = DateTime.now().toUtc(); // Usa UTC per coerenza con le partizioni GCS
+    return "${now.year}/${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}";
+  }
+
+
   Future<void> _processQuestion(String question) async {
     if (question.trim().isEmpty) {
-      setState(() {
-        _errorMessage = 'Please enter a question';
-      });
+      if (mounted) {
+        setState(() { _errorMessage = 'Please enter a question'; });
+      }
       return;
     }
 
-    setState(() {
-      _isLoading = true;
-      _errorMessage = '';
-      _currentExecutingQuery = 'Translating request to english...';
-    });
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = '';
+        _currentExecutingQuery = 'Translating request to English...';
+      });
+    }
+
+    List<Map<String, dynamic>> cloudFilesMetadata = []; // Inizializza per il blocco finally
 
     try {
-      // Recupera il nome del progetto
       final projectId = widget.bigQueryService.projectId;
-
-      // Recupera la lista dei dataset
       final datasets = await widget.bigQueryService.getDatasets();
-
       log('List of datasets: $datasets');
-      if (datasets.isEmpty) {
-        throw Exception("No datasets found in the project. Cannot proceed.");
-      }
+      if (datasets.isEmpty) throw Exception("No datasets found in the project.");
 
-      // Recupera tutte le tabelle dei dataset di destinazione (bigquery e silver)
       final Map<String, List<String>> datasetTablesMap = {};
-      for (var dataset in datasets) {
-        if (dataset != 'metadata_store') {
-          // Escludi il dataset "metadata_store"
-          final tables = await widget.bigQueryService.getTables(dataset);
-          datasetTablesMap[dataset] = tables;
+      for (var datasetId in datasets) {
+        if (datasetId.toLowerCase() != 'metadata_store') {
+          final tables = await widget.bigQueryService.getTables(datasetId);
+          datasetTablesMap[datasetId] = tables;
         }
       }
-
       log('Dataset to tables mapping: $datasetTablesMap');
 
-      // Recupera lo schema delle tabelle
-      List<Map<String, dynamic>> schemas = []; // Modifica: definisci come lista di Map<String, dynamic>
-      List<String> tableNames = []; // Store fully qualified names here
+      List<Map<String, dynamic>> schemas = [];
+      List<String> tableNames = [];
       Map<String, List<Map<String, dynamic>>> sampleData = {};
 
-      await Future.forEach(datasetTablesMap.entries, (entry) async {
+      // Recupera prima i metadati bronze, potrebbero servire per derivare partizioni campione
+      cloudFilesMetadata = await widget.bigQueryService.getBronzeMetadata();
+      log('Cloud files metadata (bronze): ${jsonEncode(cloudFilesMetadata)}');
+
+
+      for (var entry in datasetTablesMap.entries) {
         final targetDataset = entry.key;
-        final tables = entry.value;
-        for (var table in tables) {
+        final tablesInDataset = entry.value;
+        for (var tableIdInDataset in tablesInDataset) {
+          final fullTableName = '$projectId.$targetDataset.$tableIdInDataset';
           try {
-            final schemaJson = await widget.bigQueryService.getTableSchema(
-              targetDataset, // Nome del dataset
-              table, // Nome della tabella
-            );
-            
-            // Modificato: decodifica la stringa JSON in Map
+            final schemaJson = await widget.bigQueryService.getTableSchema(targetDataset, tableIdInDataset);
             final Map<String, dynamic> schemaMap = jsonDecode(schemaJson);
-            schemas.add(schemaMap);
-
-            // Formato nome tabella completo
-            final fullTableName = '$projectId.$targetDataset.$table';
+            schemas.add(schemaMap); // schemaMap è già un Map<String, dynamic>
             tableNames.add(fullTableName);
+            // log.log('Schema for table $fullTableName: ${jsonEncode(schemaMap)}'); // Può essere molto verboso
 
-            print(
-              'Schema for table $fullTableName: ${jsonEncode(schemaMap)}',
-            );
+            // --- MODIFICA PER DATI CAMPIONE CON FILTRO PARTIZIONE ---
+            String sampleQuery;
+            // Identifica se è una tabella partizionata che necessita di filtro
+            // (questo controllo è un esempio, rendilo più specifico per i tuoi nomi di tabelle partizionate)
+            bool isPartitionedTableRequiringFilter = 
+                (targetDataset == 'silver_zone' && schemaMap['fields'] != null &&
+                 (schemaMap['fields'] as List).any((field) => field['name'] == 'date_partition'));
 
-            // Ottieni un campione di dati da ogni tabella (limitato a 15 record casuali)
+            if (isPartitionedTableRequiringFilter) {
+                String partitionToSample = await _getLatestAvailablePartition(targetDataset, tableIdInDataset, cloudFilesMetadata);
+                sampleQuery = "SELECT * FROM `$fullTableName` WHERE date_partition = '$partitionToSample' LIMIT 15"; // Modificato
+                log("Using partition filter for sample query on $fullTableName: WHERE date_partition = '$partitionToSample'");
+            } else {
+                sampleQuery = "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15"; // Lascia TABLESAMPLE qui se la tabella non è partizionata o il filtro non è richiesto
+            }
+            
             try {
-              final sampleQuery =
-                  "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
-              final tableSample = await widget.bigQueryService.executeQuery(
-                sampleQuery,
-              );
+              final tableSample = await widget.bigQueryService.executeQuery(sampleQuery);
               sampleData[fullTableName] = tableSample;
             } catch (e) {
-              log(
-                'Warning: Failed to get sample data from $fullTableName. Error: $e',
-              );
+              log('Warning: Failed to get sample data from $fullTableName (Query: $sampleQuery). Error: $e');
+              sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
             }
           } catch (e) {
-            log(
-              'Warning: Failed to get schema for table $targetDataset.$table. Skipping. Error: $e',
-            );
+            log('Warning: Failed to get schema for table $fullTableName. Skipping. Error: $e');
           }
         }
-      });
-
+      }
       log('Table schemas fetched: ${schemas.length}');
-      log('Sample data fetched from ${sampleData.length} tables');
-
-      // Recupera i file caricati nel bucket bronze
-      final cloudFilesMetadata =
-          await widget.bigQueryService.getBronzeMetadata();
-
-      log('Cloud files metadata: ${jsonEncode(cloudFilesMetadata)}');
+      log('Sample data fetched for ${sampleData.keys.length} tables');
       
-      // NUOVO: Utilizzo del servizio di orchestrazione dati
-      setState(() {
-        _currentExecutingQuery = 'Orchestrating data transformations...';
-      });
+      if (mounted) {
+        setState(() { _currentExecutingQuery = 'Orchestrating data transformations...'; });
+      }
       
-      // Crea il servizio di orchestrazione
       final dataOrchestrationService = DataOrchestrationService(
         geminiService: widget.geminiService,
         bigQueryService: widget.bigQueryService,
@@ -196,85 +228,65 @@ class _SearchPageState extends State<SearchPage> {
         silverToGoldUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
       );
       
-      // Esegui l'orchestrazione dei dati
-      // Nota: non è più necessario fare il cast qui poiché schemas è già una List<Map<String, dynamic>>
       final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
-        question,
-        schemas,  // Ora è già nel formato corretto
-        tableNames,
-        sampleData,
-        cloudFilesMetadata,
+        question, schemas, tableNames, sampleData, cloudFilesMetadata,
       );
       
-      // Usa i risultati dell'orchestrazione
       final contextAnalysis = orchestrationResult['contextAnalysis'];
-      final updatedSchemas = orchestrationResult['updatedSchemas'];
-      final updatedTableNames = orchestrationResult['updatedTableNames'];
+      // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
+      final List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
+          ?.map((item) => item as Map<String, dynamic>)
+          ?.toList() ?? [];
+      final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
+          ?.map((item) => item.toString())
+          ?.toList() ?? [];
       
-      setState(() {
-        _currentExecutingQuery = 'Building optimized query...';
-      });
+      if (mounted) {
+        setState(() { _currentExecutingQuery = 'Building optimized query...'; });
+      }
 
+      // Passa i dati campione aggiornati (se l'orchestrazione li modifica, anche se non sembra farlo)
+      // e il contextAnalysis aggiornato (se l'orchestrazione lo modifica)
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
-        jsonEncode(updatedSchemas),
-        jsonEncode(updatedTableNames),
-        sampleData: sampleData,
+        jsonEncode(updatedSchemas), 
+        jsonEncode(updatedTableNames), 
+        sampleData: sampleData, // Potresti passare sampleData aggiornato se l'orchestrazione lo fa
         contextAnalysis: contextAnalysis,
       );
 
-      final cleanedSqlQuery =
-          sqlQuery
-              .replaceAll('sql', ' ')
-              .replaceAll(RegExp(r'\s+'), ' ')
-              .replaceAll(RegExp(r'\n'), ' ')
-              .replaceAll('```', '')
-              .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT')
-              .trim();
+      final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
+                                  .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
+                                  .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+      log('Executing SQL query from Gemini: $cleanedSqlQuery');
 
-      log('Executing SQL query: $cleanedSqlQuery');
+      if (mounted) {
+        setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+      }
 
-      // Set the query string to display the banner
-      setState(() {
-        _currentExecutingQuery = cleanedSqlQuery;
-      });
+      final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
+      log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
 
-      final results = await widget.bigQueryService.executeQuery(
-        cleanedSqlQuery,
-      );
-      log('Query Results: ${jsonEncode(results)}');
+      if (mounted) {
+        setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
+      }
 
-      setState(() {
-        _currentExecutingQuery = 'Analyzing query results...';
-      });
-
-      final analysis = await widget.geminiService.analyzeQueryResults(
-        cleanedSqlQuery,
-        results,
-      );
+      final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
 
       if (!mounted) return;
       Navigator.push(
         context,
-        MaterialPageRoute(
-          builder:
-              (context) => ResultPage(
-                question: question,
-                sqlQuery: cleanedSqlQuery,
-                results: results,
-                analysis: analysis,
-              ),
-        ),
+        MaterialPageRoute(builder: (context) => ResultPage(
+          question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
+        )),
       );
-    } catch (e) {
-      log('Error processing question: ${e.toString()}', error: e);
-      setState(() {
-        if (e is Exception) {
+    } catch (e, stackTrace) { // Aggiunto stackTrace
+      log('Error processing question: ${e.toString()}', error: e, stackTrace: stackTrace);
+      if (mounted) {
+        setState(() {
           _errorMessage = e.toString().replaceFirst('Exception: ', '');
-        } else {
-          _errorMessage = 'An unexpected error occurred: ${e.toString()}';
-        }
-      });
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {

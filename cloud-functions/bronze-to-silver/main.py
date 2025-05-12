@@ -3,84 +3,77 @@ import tempfile
 import datetime
 import json
 import pandas as pd
-# numpy non è usato direttamente, pandas lo usa sotto. Puoi ometterlo se non lo usi tu.
-# import numpy as np 
-from google.cloud import storage # documentai e language non sono usati qui
-from flask import Request # Già disponibile tramite functions_framework
+from google.cloud import storage
 import functions_framework
-import io # io.BytesIO è usato
-import PyPDF2
-from io import StringIO, BytesIO # StringIO non è usata
-from PIL import Image
-import base64
+from flask import Request # Per il type hint di request
+import io # Per BytesIO
+import PyPDF2 # Per i PDF
+from PIL import Image # Per le immagini
+import base64 # Per la codifica base64 delle immagini
 import traceback # Per un logging degli errori più dettagliato
+from typing import List, Dict, Any, Optional
 
-# Configurazione Globale
-SILVER_BUCKET = "silver-layer-bucket"
+# --- CONFIGURAZIONE GLOBALE ---
+# Bucket GCS dove risiedono i dati Silver. 
+# Non confondere con i prefissi radice per dati e manifest al suo interno.
+SILVER_BUCKET_NAME = "silver-layer-bucket" 
+
+# Prefissi radice all'interno del SILVER_BUCKET_NAME per separare file di dati e manifest
+SILVER_DATA_FILES_ROOT_PREFIX = "silver_data_files"  # Es: gs://silver-layer-bucket/silver_data_files/...
+SILVER_MANIFESTS_ROOT_PREFIX = "silver_manifests" # Es: gs://silver-layer-bucket/silver_manifests/...
+
 storage_client = storage.Client()
 
 # --- FUNZIONI HELPER ---
-def determine_silver_path(file_path, file_extension, content_type=None, metadata=None):
+def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
     """
-    Determina un percorso gerarchico significativo per il file Silver basato sui metadati.
+    Determina i componenti del percorso gerarchico (dominio, categoria, contesto, partizione data)
+    SENZA includere la radice "silver_data_files" o "silver_manifests".
+    'file_path_in_bronze' è il nome del blob nel bucket bronze (es. "/data/raw/ditto/file.txt").
     """
-    path_parts = file_path.split('/')
-    # original_filename = path_parts[-1] # Non usato direttamente qui
-
     data_domain = "general"
     domain_patterns = {
         "finance": ["finance", "financial", "accounting", "invoice", "payment", "transaction"],
         "sales": ["sales", "revenue", "customer", "order", "product"],
         "marketing": ["marketing", "campaign", "advertisement", "promotion"],
-        "hr": ["hr", "human-resources", "employee", "personnel", "recruitment"],
-        "operations": ["operations", "logistics", "inventory", "supply-chain"],
-        "it": ["it", "technology", "system", "software", "hardware", "tech"] # Aggiunto "tech"
+        "hr": ["hr", "human_resources", "employee", "personnel", "recruitment"], # Corretto human-resources
+        "operations": ["operations", "logistics", "inventory", "supply_chain"], # Corretto supply-chain
+        "it": ["it", "technology", "system", "software", "hardware", "tech", "dev"] # Aggiunto dev
     }
     
-    lower_path = file_path.lower()
+    lower_file_path_in_bronze = file_path_in_bronze.lower()
     for domain, patterns in domain_patterns.items():
-        if any(pattern in lower_path for pattern in patterns):
+        if any(pattern in lower_file_path_in_bronze for pattern in patterns):
             data_domain = domain
             break
     
     file_category = "unknown"
-    if file_extension in ["csv", "parquet", "json", "jsonl"]:
-        file_category = "structured"
-    elif file_extension in ["pdf", "txt", "doc", "docx", "md"]:
-        file_category = "document"
-    elif file_extension in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "svg", "webp"]:
-        file_category = "image"
-    elif file_extension in ["xls", "xlsx", "ods"]:
-        file_category = "spreadsheet"
+    if file_extension in ["csv", "parquet", "json", "jsonl", "avro", "orc"]: file_category = "structured"
+    elif file_extension in ["pdf", "txt", "doc", "docx", "md", "rtf", "html"]: file_category = "document"
+    elif file_extension in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "svg", "webp", "heic"]: file_category = "image"
+    elif file_extension in ["xls", "xlsx", "ods", "numbers"]: file_category = "spreadsheet"
     
-    content_context = ""
+    content_context = "generic" # Default più esplicito
     if content_type:
         ct_lower = content_type.lower()
-        if "application/json" in ct_lower:
-            content_context = "json-data"
-        elif "text/csv" in ct_lower:
-            content_context = "csv-data"
-        elif "application/pdf" in ct_lower:
-            content_context = "pdf-document"
-        elif "image/" in ct_lower:
-            content_context = content_type.split('/')[-1].replace('jpeg', 'jpg') + "-image" # es. png-image
-        elif "text/plain" in ct_lower:
-            content_context = "text-file"
+        if "application/json" in ct_lower: content_context = "json_data" # Underscore per coerenza GCS
+        elif "text/csv" in ct_lower: content_context = "csv_data"
+        elif "application/pdf" in ct_lower: content_context = "pdf_document"
+        elif "image/" in ct_lower: content_context = ct_lower.split('/')[-1].replace('jpeg', 'jpg') + "_image"
+        elif "text/plain" in ct_lower: content_context = "text_file"
+        elif "excel" in ct_lower or "spreadsheetml" in ct_lower: content_context = "excel_spreadsheet"
 
-    date_partition = datetime.datetime.utcnow().strftime("%Y/%m/%d")
+    date_partition_str = datetime.datetime.utcnow().strftime("%Y/%m/%d") # YYYY/MM/DD
     
-    hierarchy = [
-        "silver", # Livello principale
+    path_components = [
         data_domain,
         file_category,
-        content_context if content_context else "generic-data",
-        f"date_partition={date_partition}" # Hive-style partitioning
+        content_context,
+        f"date_partition={date_partition_str}" # Stile partizione Hive
     ]
-    
-    hierarchy = [part for part in hierarchy if part] 
-    return "/".join(hierarchy)
+    return [part for part in path_components if part] # Rimuove eventuali None o stringhe vuote
 
-def process_pdf(tmp_filename):
+def process_pdf(tmp_filename: str) -> pd.DataFrame:
     """Elabora un file PDF estraendo testo e metadata."""
     text_content = ""
     page_count = 0
@@ -91,284 +84,290 @@ def process_pdf(tmp_filename):
             for page_num in range(page_count):
                 page = pdf_reader.pages[page_num]
                 page_text = page.extract_text()
-                if page_text:
-                    text_content += page_text + "\n"
+                if page_text: # Aggiungi solo se c'è testo estratto
+                    text_content += page_text.strip() + "\n\n" # Aggiungi newline doppio per separare pagine
         
         return pd.DataFrame([{
-            "content_type_processed": "application/pdf", # Evita conflitto con colonna content_type originale
-            "text_content": text_content,
-            "page_count": page_count,
-            "processed_ok": True # Evita conflitto con 'processed'
+            "content_type_processed": "application/pdf",
+            "extracted_text": text_content.strip(), # Rimuovi spazi extra alla fine
+            "pdf_page_count": page_count,
+            "deep_processed_ok": True
         }])
     except Exception as e:
-        print(f"Errore durante l'elaborazione del PDF '{tmp_filename}': {e}")
+        print(f"Error processing PDF '{tmp_filename}': {e}")
         traceback.print_exc()
-        return pd.DataFrame([{"error_processing_pdf": str(e), "processed_ok": False}])
+        return pd.DataFrame([{"error_processing_pdf": str(e), "deep_processed_ok": False}])
 
-def process_image(tmp_filename, file_ext_original):
+def process_image(tmp_filename: str, file_ext_original: str) -> pd.DataFrame:
     """Elabora un'immagine estraendo metadati di base e immagine in base64."""
     try:
         img = Image.open(tmp_filename)
-        metadata = {
+        img_metadata = {
             "width": img.width,
             "height": img.height,
-            "format": img.format, # Formato originale dell'immagine come letto da Pillow
+            "format_original": img.format, 
             "mode": img.mode,
         }
         
-        buffered = BytesIO()
-        # Salva in un formato web-friendly comune per base64 se il formato originale non è standard
-        # o per coerenza. PNG è lossless e ben supportato.
-        save_format = img.format if img.format and img.format.upper() in ['PNG', 'JPEG', 'GIF'] else 'PNG'
-        img.save(buffered, format=save_format)
+        buffered = io.BytesIO() # Usare io.BytesIO
+        # Salva in un formato web-friendly come PNG per base64
+        save_format_for_b64 = 'PNG' if img.format != 'PNG' else img.format # Mantieni PNG se è già PNG
+        if img.mode == 'P': # Converti palette in RGBA per evitare problemi con alcuni formati come GIF in PNG
+            img = img.convert('RGBA')
+        elif img.mode == 'CMYK': # Converti CMYK in RGB
+             img = img.convert('RGB')
+
+        img.save(buffered, format=save_format_for_b64)
         img_str_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
         return pd.DataFrame([{
-            "content_type_processed": f"image/{save_format.lower()}", # Tipo dell'immagine salvata
-            "image_width": metadata["width"],
-            "image_height": metadata["height"],
-            "image_format_original": metadata["format"], # Formato del file originale
-            "image_mode": metadata["mode"],
-            "image_data_b64": img_str_b64,
-            "processed_ok": True
+            "content_type_processed": f"image/{save_format_for_b64.lower()}",
+            "image_width": img_metadata["width"],
+            "image_height": img_metadata["height"],
+            "image_format_original": img_metadata["format_original"],
+            "image_mode": img_metadata["mode"],
+            "image_data_b64": img_str_b64, # Stringa Base64
+            "deep_processed_ok": True
         }])
     except Exception as e:
-        print(f"Errore durante l'elaborazione dell'immagine '{tmp_filename}': {e}")
+        print(f"Error processing image '{tmp_filename}': {e}")
         traceback.print_exc()
-        return pd.DataFrame([{"error_processing_image": str(e), "processed_ok": False}])
+        return pd.DataFrame([{"error_processing_image": str(e), "deep_processed_ok": False}])
 
 # --- FUNZIONE PRINCIPALE CLOUD FUNCTION ---
 @functions_framework.http
 def bronze_to_silver(request: Request):
     """
     Funzione HTTP per convertire file dal bucket bronze al bucket silver.
+    Salva i dati Parquet in una struttura di cartelle e i manifest JSON in una struttura parallela.
     """
     # Gestione della richiesta preflight CORS (OPTIONS)
     if request.method == 'OPTIONS':
         headers = {
-            'Access-Control-Allow-Origin': '*',  # Sii più specifico in produzione! Es: 'https://tuo-dominio-app.com'
+            'Access-Control-Allow-Origin': '*', 
             'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization', # Aggiungi Authorization se usi token
             'Access-Control-Max-Age': '3600'
         }
         return ('', 204, headers)
 
-    # Header CORS per le risposte effettive
-    response_cors_headers = {
-        'Access-Control-Allow-Origin': '*' # Sii più specifico in produzione!
-    }
-
-    tmp_in_path = None
-    tmp_out_path = None
+    response_cors_headers = {'Access-Control-Allow-Origin': '*'}
+    tmp_in_path, tmp_out_path = None, None
+    data_payload = {} # Per avere 'path' disponibile nel blocco finally
 
     try:
+        print(f"bronze-to-silver: Request received. Method: {request.method}")
+        # print(f"Headers: {request.headers}") # Logga gli header solo se necessario per debug CORS approfondito
+
         if not request.is_json:
             return ({"status": "error", "error": "Invalid content type, expected application/json"}, 415, response_cors_headers)
-
-        data = request.get_json(silent=True)
-        if data is None:
+        
+        data_payload = request.get_json(silent=True)
+        if data_payload is None: 
              return ({"status": "error", "error": "Malformed JSON or empty request body"}, 400, response_cors_headers)
-
-        if "path" not in data:
+        if "path" not in data_payload: 
             return ({"status": "error", "error": "Missing 'path' in request JSON"}, 400, response_cors_headers)
 
-        full_path = data["path"]
-        force_processing = data.get("force_processing", False)
-        custom_prefix = data.get("custom_prefix", None)
+        full_path_from_caller = data_payload["path"]
+        force_processing = data_payload.get("force_processing", False)
+        custom_data_prefix_override = data_payload.get("custom_prefix", None) # Rinominato per chiarezza
         
-        if not isinstance(full_path, str) or '/' not in full_path:
+        if not isinstance(full_path_from_caller, str) or '/' not in full_path_from_caller:
              return ({"status": "error", "error": "Invalid 'path' format. Expected string 'bucket_name/path/to/file'"}, 400, response_cors_headers)
 
-        bucket_name, *blob_parts = full_path.split("/", 1)
-        if not blob_parts or not blob_parts[0]: # blob_parts[0] è blob_name
+        bronze_bucket_name, *blob_parts = full_path_from_caller.split("/", 1)
+        if not blob_parts or not blob_parts[0]:
             return ({"status": "error", "error": "Invalid path format. File path part is missing after bucket name."}, 400, response_cors_headers)
-        blob_name_without_leading_slash = blob_parts[0] 
+        
+        # Questo è il path dell'oggetto come inviato da Dart (es. "data/raw/ditto/file.txt")
+        object_path_from_caller_no_leading_slash = blob_parts[0].lstrip('/')
+        
+        # Ricostruisci il nome del blob come è in GCS (con lo / iniziale)
+        blob_name_in_gcs = f"/{object_path_from_caller_no_leading_slash}"
 
-        # !!! MODIFICA CRUCIALE QUI !!!
-        # Dato che i tuoi oggetti in GCS iniziano con "/", ricostruisci il blob_name con lo slash iniziale.
-        blob_name = f"/{blob_name_without_leading_slash.lstrip('/')}"
-        # .lstrip('/') è una precauzione nel caso blob_name_without_leading_slash fosse vuoto o iniziasse già con / per errore
+        print(f"Original path from caller: '{full_path_from_caller}'")
+        print(f"Derived bronze_bucket_name: '{bronze_bucket_name}'")
+        print(f"Blob name used for GCS operations: '{blob_name_in_gcs}'")
 
-        print(f"Python bronze-to-silver: Original path from Dart was '{full_path}'")
-        print(f"Python bronze-to-silver: Derived bucket_name='{bucket_name}'")
-        print(f"Python bronze-to-silver: Derived blob_name_without_leading_slash='{blob_name_without_leading_slash}'")
-        print(f"Python bronze-to-silver: Assuming actual blob name in GCS starts with '/', trying: '{blob_name}'")
+        file_name_original_ext = os.path.basename(blob_name_in_gcs) # Es: "file.txt"
+        file_extension_original = os.path.splitext(file_name_original_ext)[1].lower().lstrip('.')
 
-        file_name_original = os.path.basename(blob_name) # Usa il nome con lo slash per coerenza
-        file_extension_original = os.path.splitext(file_name_original)[1].lower().lstrip('.')
+        bronze_bucket = storage_client.bucket(bronze_bucket_name)
+        bronze_blob = bronze_bucket.blob(blob_name_in_gcs)
 
-        bronze_bucket_obj = storage_client.bucket(bucket_name)
-        bronze_blob = bronze_bucket_obj.blob(blob_name) # <--- USA IL NOME CORRETTO DEL BLOB
-
-        print(f"Python bronze-to-silver: Checking existence of gs://{bucket_name}{blob_name}") # Nota: gs://bucket/path (path già inizia con /)
-
+        print(f"Checking existence of bronze file: gs://{bronze_bucket_name}{blob_name_in_gcs}")
         if not bronze_blob.exists():
-            # Se ancora non lo trova, i permessi o un errore di battitura SUL NOME EFFETTIVO IN GCS sono il problema.
-            return ({"status": "error", "error": f"File not found in bronze: gs://{bucket_name}{blob_name}"}, 404, response_cors_headers)
-
-        print(f"Python bronze-to-silver: File gs://{bucket_name}{blob_name} confirmed to exist.")
+            return ({"status": "error", "error": f"File not found in bronze: gs://{bronze_bucket_name}{blob_name_in_gcs}"}, 404, response_cors_headers)
+        print(f"Bronze file gs://{bronze_bucket_name}{blob_name_in_gcs} confirmed to exist.")
         
-        # Ricarica i metadati del blob per avere content_type e size aggiornati
         bronze_blob.reload() 
-        blob_content_type = bronze_blob.content_type or "application/octet-stream"
-        blob_size = bronze_blob.size
+        original_blob_content_type = bronze_blob.content_type or "application/octet-stream"
+        original_blob_size = bronze_blob.size
 
-        if custom_prefix is None:
-            silver_prefix_base = determine_silver_path(
-                file_path=blob_name, # Usa blob_name che è il path relativo al bucket
-                file_extension=file_extension_original,
-                content_type=blob_content_type
-            )
-        else:
-            silver_prefix_base = custom_prefix
+        # Determina i suffissi di path basati sui metadati
+        path_suffix_components = determine_silver_path_components(
+            blob_name_in_gcs, # Passa il nome del blob (con / iniziale) per l'analisi del dominio
+            file_extension_original, 
+            original_blob_content_type
+        )
+        path_suffix_str = "/".join(path_suffix_components)
+
+        # Costruisci i path base per dati e manifest
+        silver_data_files_base_path = f"{SILVER_DATA_FILES_ROOT_PREFIX}/{path_suffix_str}"
+        silver_manifests_base_path = f"{SILVER_MANIFESTS_ROOT_PREFIX}/{path_suffix_str}"
         
-        base_filename_no_ext = os.path.splitext(file_name_original)[0]
-        # Il nome del file in Silver sarà sempre .parquet
-        silver_file_name = f"{base_filename_no_ext}.parquet"
-        silver_full_path = f"{silver_prefix_base}/{silver_file_name}"
+        # Override del path dei dati se custom_prefix è fornito
+        if custom_data_prefix_override:
+            silver_data_files_base_path = custom_data_prefix_override.rstrip('/')
+            # Se custom_prefix è usato, il manifest potrebbe andare in una posizione standard o derivata
+            # Per ora, manteniamo la logica del manifest basata sui path component derivati,
+            # a meno che non si voglia una logica più complessa per custom_prefix e manifest.
+            print(f"Using custom data prefix: {silver_data_files_base_path}")
+
+
+        base_filename_no_ext = os.path.splitext(file_name_original_ext)[0]
+        silver_parquet_filename = f"{base_filename_no_ext}.parquet"
+        
+        silver_parquet_full_gcs_path = f"{silver_data_files_base_path}/{silver_parquet_filename}"
+        silver_manifest_full_gcs_path = f"{silver_manifests_base_path}/_partition_manifest.json"
 
         if not force_processing:
-            silver_blob_check = storage_client.bucket(SILVER_BUCKET).blob(silver_full_path)
+            silver_blob_check = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_parquet_full_gcs_path)
             if silver_blob_check.exists():
+                print(f"File {silver_parquet_full_gcs_path} already processed. Attempting to read its schema.")
+                cols_from_existing = []
+                try:
+                    # Per leggere da GCS direttamente con Pandas, potresti aver bisogno di gcsfs
+                    # Assicurati che 'gcsfs' sia nel tuo requirements.txt
+                    # Oppure scarica temporaneamente come hai fatto prima
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_exist:
+                        silver_blob_check.download_to_filename(tmp_exist.name)
+                        # Leggi solo lo schema non caricando tutti i dati usando columns=[] o nrows=0
+                        # Tuttavia, per ottenere i nomi delle colonne, basta pd.read_parquet(path).columns
+                        parquet_file = pd.read_parquet(tmp_exist.name) # Carica una piccola parte o solo metadati se possibile
+                        cols_from_existing = parquet_file.columns.tolist()
+                        os.unlink(tmp_exist.name)
+                    print(f"Schema read from existing Parquet: {cols_from_existing}")
+                except Exception as e_schema:
+                    print(f"Warning: Could not read schema from existing Parquet gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}: {e_schema}")
+                
                 return ({"status": "success", 
-                         "message": f"File already processed and exists at: gs://{SILVER_BUCKET}/{silver_full_path}", 
-                         "silver_path": f"gs://{SILVER_BUCKET}/{silver_full_path}"}, 
-                        200, response_cors_headers)
+                        "message": f"File already processed: gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}", 
+                        "silver_path": f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}",
+                        "columns": cols_from_existing, # Restituisci le colonne
+                        "silver_path_prefix_base": silver_data_files_base_path 
+                        }, 200, response_cors_headers)
 
-        # Scarica oggetto bronze in un file temporaneo con nome
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension_original}" if file_extension_original else "") as tmp_in:
             tmp_in_path = tmp_in.name
         bronze_blob.download_to_filename(tmp_in_path)
-        print(f"Downloaded gs://{bucket_name}/{blob_name} to {tmp_in_path}")
+        print(f"Downloaded gs://{bronze_bucket_name}{blob_name_in_gcs} to {tmp_in_path}")
         
-        # Elabora in base al tipo di file
-        processing_df = None
-        if file_extension_original in ["csv", "tsv"]:
+        df_processed = None # DataFrame risultante dal processamento
+        # ... (TUTTA la tua logica if/elif per pd.read_csv, read_json, process_pdf, process_image, ecc. VA QUI) ...
+        # Assicurati che assegni il risultato a df_processed
+        # Esempio per TXT (adatta con la tua logica completa):
+        if file_extension_original == "txt":
+            with open(tmp_in_path, 'r', encoding='utf-8', errors='replace') as f_txt:
+                df_processed = pd.DataFrame([{"extracted_text": f_txt.read(), "deep_processed_ok": True}])
+        elif file_extension_original in ["csv", "tsv"]:
             delimiter = ',' if file_extension_original == "csv" else '\t'
-            processing_df = pd.read_csv(tmp_in_path, delimiter=delimiter)
-        elif file_extension_original == "json": # JSON array di oggetti
-            try:
-                processing_df = pd.read_json(tmp_in_path, orient='records')
-            except ValueError: # Prova come JSONL se fallisce
-                 try:
-                    processing_df = pd.read_json(tmp_in_path, lines=True)
-                 except ValueError as e_json:
-                    return ({"status":"error", "error": f"Failed to parse JSON: {e_json}"}, 400, response_cors_headers)
-        elif file_extension_original == "jsonl": # JSON Lines
-             processing_df = pd.read_json(tmp_in_path, lines=True)
-        elif file_extension_original == "parquet":
-            processing_df = pd.read_parquet(tmp_in_path)
-        elif file_extension_original == "xlsx" or file_extension_original == "xls":
-            processing_df = pd.read_excel(tmp_in_path, engine=None) # Lascia che pandas scelga l'engine
-        elif file_extension_original == "pdf":
-            processing_df = process_pdf(tmp_in_path)
+            df_processed = pd.read_csv(tmp_in_path, delimiter=delimiter)
+        elif file_extension_original == "json":
+            try: df_processed = pd.read_json(tmp_in_path, orient='records')
+            except ValueError: 
+                try: df_processed = pd.read_json(tmp_in_path, lines=True)
+                except ValueError as e_json: return ({"status":"error", "error": f"Failed to parse JSON: {e_json}"}, 400, response_cors_headers)
+        elif file_extension_original == "jsonl": df_processed = pd.read_json(tmp_in_path, lines=True)
+        elif file_extension_original == "parquet": df_processed = pd.read_parquet(tmp_in_path)
+        elif file_extension_original in ["xlsx", "xls"]: df_processed = pd.read_excel(tmp_in_path, engine=None)
+        elif file_extension_original == "pdf": df_processed = process_pdf(tmp_in_path)
         elif file_extension_original in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "webp", "svg"]:
-            processing_df = process_image(tmp_in_path, file_extension_original)
-        else:
-            # Per tipi non supportati, crea DataFrame con metadati di base del file originale
-            # e un flag per indicare che non è stato processato in dettaglio
-            processing_df = pd.DataFrame([{
-                "original_content_type": blob_content_type,
-                "original_file_size_bytes": blob_size,
-                "original_file_name": file_name_original,
-                "deep_processed": False, # Flag per indicare che non c'è stata elaborazione profonda
-                "processing_note": "Unsupported file type for deep processing, basic metadata stored."
+            df_processed = process_image(tmp_in_path, file_extension_original)
+        else: # Fallback per tipi non supportati
+            df_processed = pd.DataFrame([{
+                "original_content_type": original_blob_content_type,
+                "original_file_size_bytes": original_blob_size,
+                "original_file_name": file_name_original_ext, # Nome file originale con estensione
+                "deep_processed_ok": False,
+                "processing_note": f"Unsupported file type '{file_extension_original}' for deep processing."
             }])
+
+        if not isinstance(df_processed, pd.DataFrame):
+            return ({"status": "error", "error": "Internal error: Processing did not yield a DataFrame."}, 500, response_cors_headers)
+
+        # Aggiungi metadati standard
+        df_processed["silver_ingestion_ts"] = datetime.datetime.utcnow()
+        df_processed["bronze_source_uri"] = f"gs://{bronze_bucket_name}{blob_name_in_gcs}"
+        if "original_file_extension" not in df_processed.columns: # Aggiungi se non già presente da un processamento specifico
+             df_processed["original_file_extension"] = file_extension_original
         
-        # Verifica che processing_df sia un DataFrame
-        if not isinstance(processing_df, pd.DataFrame):
-            return ({"status": "error", "error": "Processing did not return a DataFrame."}, 500, response_cors_headers)
-
-        # Aggiungi metadati standard al DataFrame risultante
-        processing_df["silver_ingestion_ts"] = datetime.datetime.utcnow()
-        processing_df["bronze_source_file_uri"] = f"gs://{bucket_name}/{blob_name}"
-        # file_extension_original è già una colonna se il file non è stato processato in profondità
-        if "original_file_extension" not in processing_df.columns:
-             processing_df["original_file_extension"] = file_extension_original
+        # Estrai data_domain e file_category dal path suffix (che non include la radice)
+        df_processed["silver_data_domain"] = path_suffix_components[0] if len(path_suffix_components) > 0 else "general"
+        df_processed["silver_file_category"] = path_suffix_components[1] if len(path_suffix_components) > 1 else "unknown"
         
-        # Estrae data_domain e file_category dal silver_prefix_base
-        # silver_prefix_base = "silver/data_domain/file_category/content_context/date_partition=YYYY/MM/DD"
-        prefix_parts = silver_prefix_base.split('/')
-        processing_df["silver_data_domain"] = prefix_parts[1] if len(prefix_parts) > 1 else "general"
-        processing_df["silver_file_category"] = prefix_parts[2] if len(prefix_parts) > 2 else "unknown"
-
-
-        # Scrivi Parquet nel bucket silver usando il percorso gerarchico
         with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_out:
             tmp_out_path = tmp_out.name
-        processing_df.to_parquet(tmp_out_path, index=False, engine='pyarrow') # Specifica engine
-        print(f"DataFrame converted to Parquet at {tmp_out_path}")
-
-        silver_blob_upload = storage_client.bucket(SILVER_BUCKET).blob(silver_full_path)
-        silver_blob_upload.upload_from_filename(tmp_out_path)
-        print(f"Uploaded Parquet to gs://{SILVER_BUCKET}/{silver_full_path}")
-
-        # Aggiorna manifest nelle relative cartelle gerarchiche
-        # Il manifest è al livello del content_context, un livello sopra date_partition
-        manifest_directory_path = "/".join(silver_prefix_base.split('/')[:-1]) 
-        manifest_full_path = f"{manifest_directory_path}/_manifest.json"
+        df_processed.to_parquet(tmp_out_path, index=False, engine='pyarrow')
         
-        meta_blob = storage_client.bucket(SILVER_BUCKET).blob(manifest_full_path)
-        manifest_data = []
-        if meta_blob.exists():
+        silver_blob_data_upload = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_parquet_full_gcs_path)
+        silver_blob_data_upload.upload_from_filename(tmp_out_path)
+        print(f"Uploaded Parquet to gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}")
+
+        # Aggiorna manifest
+        manifest_blob = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_manifest_full_gcs_path)
+        current_manifest_entries = []
+        if manifest_blob.exists():
             try:
-                manifest_content = meta_blob.download_as_text()
-                manifest_data = json.loads(manifest_content)
-                if not isinstance(manifest_data, list): # Se il manifest è corrotto, inizia da capo
-                    manifest_data = []
-            except json.JSONDecodeError:
-                print(f"Warning: Manifest file at {manifest_full_path} is corrupted. Starting new manifest.")
-                manifest_data = []
-            except Exception as e_manifest_download:
-                print(f"Warning: Could not download or parse manifest at {manifest_full_path}: {e_manifest_download}. Starting new manifest.")
-                manifest_data = []
+                manifest_content = manifest_blob.download_as_text()
+                loaded_manifest = json.loads(manifest_content)
+                if isinstance(loaded_manifest, list):
+                    current_manifest_entries = loaded_manifest
+                else:
+                    print(f"Warning: Manifest {silver_manifest_full_gcs_path} was not a list. Reinitializing.")
+            except Exception as e_m_load:
+                print(f"Warning: Could not load/parse manifest {silver_manifest_full_gcs_path}: {e_m_load}. Reinitializing.")
         
-        # Rimuovi vecchia entry se esiste per lo stesso silver_full_path (per rielaborazioni)
-        manifest_data = [entry for entry in manifest_data if entry.get("silver_file_uri") != f"gs://{SILVER_BUCKET}/{silver_full_path}"]
-
-        manifest_data.append({
-            "silver_file_uri": f"gs://{SILVER_BUCKET}/{silver_full_path}", 
-            "bronze_source_uri": f"gs://{bucket_name}/{blob_name}",
-            "record_count": len(processing_df),
+        uri_parquet_in_silver = f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}"
+        current_manifest_entries = [e for e in current_manifest_entries if e.get("silver_file_uri") != uri_parquet_in_silver]
+        
+        current_manifest_entries.append({
+            "silver_file_uri": uri_parquet_in_silver, 
+            "bronze_source_uri": f"gs://{bronze_bucket_name}{blob_name_in_gcs}",
+            "record_count": len(df_processed),
             "silver_processed_at": datetime.datetime.utcnow().isoformat() + "Z",
-            "original_content_type": blob_content_type,
-            "original_file_size_bytes": blob_size,
-            "silver_df_schema": {col: str(dtype) for col, dtype in processing_df.dtypes.items()},
-            "silver_path_prefix_base": silver_prefix_base # Il path senza il nome file
+            "original_content_type": original_blob_content_type,
+            "original_file_size_bytes": original_blob_size,
+            "silver_df_schema": {col: str(dtype) for col, dtype in df_processed.dtypes.items()},
+            "silver_data_path_base": silver_data_files_base_path # Path della cartella dati per questa partizione
         })
-        
-        meta_blob.upload_from_string(json.dumps(manifest_data, indent=2), content_type="application/json")
-        print(f"Manifest updated at gs://{SILVER_BUCKET}/{manifest_full_path}")
+        manifest_blob.upload_from_string(json.dumps(current_manifest_entries, indent=2), content_type="application/json")
+        print(f"Manifest updated at gs://{SILVER_BUCKET_NAME}/{silver_manifest_full_gcs_path}")
 
-        # Opzionalmente, cancella l'oggetto originale dal bucket bronze
-        delete_message = f"Original file gs://{bucket_name}/{blob_name} kept in bronze."
-        if data.get("delete_original", False) is True: # Controllo esplicito per True
+        delete_msg = f"Original gs://{bronze_bucket_name}{blob_name_in_gcs} kept."
+        if data_payload.get("delete_original", False) is True:
             bronze_blob.delete()
-            delete_message = f"Original file gs://{bucket_name}/{blob_name} deleted from bronze."
-            print(delete_message)
+            delete_msg = f"Original gs://{bronze_bucket_name}{blob_name_in_gcs} deleted."
+            print(delete_msg)
 
-        response_payload = {
+        response_data = {
             "status": "success",
-            "message": f"Processed gs://{bucket_name}/{blob_name} and loaded to silver: gs://{SILVER_BUCKET}/{silver_full_path}. {delete_message}",
-            "silver_file_uri": f"gs://{SILVER_BUCKET}/{silver_full_path}",
-            "record_count": len(processing_df),
-            "silver_df_columns": list(processing_df.columns),
-            "silver_path_prefix_base": silver_prefix_base
+            "message": f"Processed gs://{bronze_bucket_name}{blob_name_in_gcs} to Silver: {uri_parquet_in_silver}. {delete_msg}",
+            "silver_path": uri_parquet_in_silver,
+            "columns": list(df_processed.columns),
+            "record_count": len(df_processed),
+            "silver_path_prefix_base": silver_data_files_base_path
         }
-        return (response_payload, 200, response_cors_headers)
+        return (response_data, 200, response_cors_headers)
 
     except Exception as e:
-        error_message = str(e)
-        print(f"Unhandled error in bronze_to_silver for input path '{data.get('path', 'N/A')}': {error_message}")
+        error_msg = str(e)
+        print(f"Unhandled error in bronze_to_silver for input path '{data_payload.get('path', 'N/A')}': {error_msg}")
         traceback.print_exc() 
-        return ({"status": "error", "error": error_message, "details": traceback.format_exc()}, 500, response_cors_headers)
+        return ({"status": "error", "error": error_msg, "details": traceback.format_exc()}, 500, response_cors_headers)
     
     finally:
-        # Pulizia file temporanei in modo sicuro
-        for temp_path in [tmp_in_path, tmp_out_path]:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                    print(f"Successfully unlinked temporary file: {temp_path}")
-                except Exception as e_unlink:
-                    print(f"Error unlinking temporary file {temp_path}: {e_unlink}")
+        for temp_p in [tmp_in_path, tmp_out_path]:
+            if temp_p and os.path.exists(temp_p):
+                try: os.unlink(temp_p); print(f"Cleaned up temp file: {temp_p}")
+                except Exception as e_unlink: print(f"Error unlinking temp file {temp_p}: {e_unlink}")

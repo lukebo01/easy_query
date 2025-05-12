@@ -203,6 +203,12 @@ class GeminiFlashService {
       Suggested unions: $unionsJson
       
       Value transformations: $valueTransformations
+
+      IMPORTANT:
+      - If querying a table that you know is partitioned by a column (e.g., 'date_partition'),
+        you MUST include a filter on that partition column in the WHERE clause to ensure query efficiency.
+        For example: WHERE date_partition = '2025/05/12' OR date_partition >= '2025/01/01'.
+        If the user query implies a date range, use it. Otherwise, consider a recent range or ask for clarification.
     ''';
     }
     // -- 3: Build the final prompt for SQL generation --

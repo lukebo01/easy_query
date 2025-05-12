@@ -18,3 +18,5 @@ PyPDF2>=3.0.0
 Pillow>=9.0.0
 # Altre dipendenze
 requests==2.31.0
+
+gcsfs
