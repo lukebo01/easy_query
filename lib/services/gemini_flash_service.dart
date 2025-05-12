@@ -178,61 +178,64 @@ class GeminiFlashService {
             
             ${contextAnalysis != null ? 'Context analysis: ${jsonEncode(contextAnalysis)}' : ''}
             
-            IMPORTANT INSTRUCTIONS FOR DATE HANDLING:
-            1. When filtering on a date_partition field that is stored as STRING in format 'YYYY/MM/DD', 
-               ALWAYS use PARSE_DATE('%Y/%m/%d', date_partition) to convert it to a DATE before comparison.
-            2. NEVER compare STRING date_partition directly with DATE functions like CURRENT_DATE() or DATE_SUB().
-            3. CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
-            4. INCORRECT EXAMPLE: WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
-            
-            Generate a single SQL query that answers the user's question.
-            Ensure that your query:
-            1. Uses only tables that exist in the provided schema
-            2. References columns that are present in those tables
-            3. Follows best practices for performance, including limiting result size when appropriate
-            4. Uses proper table name qualification with project and dataset IDs
-            5. Uses LEFT JOINs when appropriate to avoid losing data
-            6. Uses the proper syntax for BigQuery SQL
-            7. Applies appropriate filtering conditions based on the user's question
-            8. ALWAYS use PARSE_DATE('%Y/%m/%d', date_partition) when comparing date_partition fields with DATE types
-            
-            Return only the SQL query without any additional explanation or markdown formatting.
-
-
             IMPORTANT INSTRUCTIONS FOR SQL GENERATION (MANDATORY FOR ALL QUERIES):
 
-            1.  MANDATORY PARTITION FILTER:
-                IF you query any table that includes 'date_partition' in its schema 
-                (like `soy-transducer-456512-t0.silver_zone.silver_data_files_it_document_text_file` 
-                or any table in the `silver_zone` dataset that is similarly structured),
-                YOU ABSOLUTELY MUST INCLUDE A WHERE CLAUSE THAT FILTERS THE 'date_partition' COLUMN.
-                If the user's question does not provide a specific date or date range, 
-                you MUST query a recent and relevant range (e.g., the last 30 days from the current date) 
-                OR the latest available partition if known.
-                DO NOT generate a query for these partitioned tables without a 'date_partition' filter.
+            1. MANDATORY PARTITION FILTER:
+               IF you query any table that includes 'date_partition' in its schema 
+               (like `soy-transducer-456512-t0.silver_zone.silver_data_files_it_document_text_file` 
+               or any table in the `silver_zone` dataset that is Hive-partitioned by 'date_partition'),
+               YOU ABSOLUTELY MUST INCLUDE A WHERE CLAUSE THAT FILTERS THE 'date_partition' COLUMN.
+               
+               If the user's question does not provide a specific date or date range, 
+               you MUST query a recent and relevant range (e.g., the last 30 days from the current date using 
+               `PARSE_DATE('%Y/%m/%d', date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()`).
+               
+               Alternatively, if a specific relevant partition like '2025/05/12' is known or provided in context, use that: `date_partition = '2025/05/12'`.
+               DO NOT generate a query for these partitioned tables without an effective 'date_partition' filter.
 
-            2.  DATE COMPARISON FOR 'date_partition' COLUMN (WHICH IS A STRING 'YYYY/MM/DD'):
-                If you filter 'date_partition' by comparing it to a DATE type value 
-                (e.g., from CURRENT_DATE(), DATE_SUB(), or a DATE literal like DATE('2023-01-01')),
-                YOU MUST EXPLICITLY CONVERT THE 'date_partition' STRING to a DATE type before the comparison.
-                USE THE FUNCTION: PARSE_DATE('%Y/%m/%d', date_partition)
-                CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-                INCORRECT EXAMPLE (THIS WILL FAIL): WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-                ALWAYS PERFORM THIS CONVERSION for date comparisons involving the 'date_partition' STRING column.
-            '''
+            2. DATE COMPARISON FOR 'date_partition' COLUMN (WHICH IS A STRING 'YYYY/MM/DD'):
+               When you filter 'date_partition' by comparing it to a DATE type value 
+               (e.g., from CURRENT_DATE(), DATE_SUB(), or a DATE literal like DATE('2023-01-01')),
+               YOU MUST EXPLICITLY CONVERT THE 'date_partition' STRING to a DATE type before the comparison.
+               
+               USE THE FUNCTION: PARSE_DATE('%Y/%m/%d', date_partition)
+               
+               CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+               INCORRECT EXAMPLE (THIS WILL FAIL): WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+               
+               ALWAYS PERFORM THIS CONVERSION for date comparisons involving the 'date_partition' STRING column.
+
+            Generate a single SQL query that answers the user's question.
+            Ensure that your query:
+            1. Uses standard BigQuery SQL syntax
+            2. Includes all necessary JOINs based on the schema
+            3. Applies appropriate filters based on the user's question
+            4. Formats dates and timestamps properly
+            5. Handles any aggregations or grouping required
+            6. Uses appropriate column aliases for readability
+            7. Sorts results in a logical order
+            8. Limits the result set if appropriate
+            9. Uses appropriate functions for text manipulation, date handling, etc.
+            10. Does not include any comments or explanations in the SQL itself
+            
+            Return only the SQL query without any additional text or explanations.
+              ''',
             },
           ],
         },
-      ]
+      ],
+      'generationConfig': {'temperature': 0.2, 'topP': 0.8, 'topK': 40},
     };
 
     final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
       payload,
     );
 
     if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      return response['candidates'][0]['content']['parts'][0]['text'].trim();
+      final sqlQuery = response['candidates'][0]['content']['parts'][0]['text'].trim();
+      // Clean up any markdown code blocks if present
+      return sqlQuery.replaceAll('```sql', '').replaceAll('```', '').trim();
     }
 
     throw Exception('Failed to generate SQL query');

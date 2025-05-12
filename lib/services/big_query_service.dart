@@ -411,7 +411,7 @@ class BigQueryService {
       ..autodetect = false 
       ..schema = schemaForDataColumnsOnly;
 
-    // Determina se è partizionata Hive e calcola i path corretti
+    // Estrai il nome del bucket e il path relativo
     String pathWithoutGs = gcsParquetUri.startsWith('gs://') ? gcsParquetUri.substring(5) : gcsParquetUri;
     int firstSlashAfterBucketIdx = pathWithoutGs.indexOf('/');
     if (firstSlashAfterBucketIdx == -1) {
@@ -422,41 +422,46 @@ class BigQueryService {
     String bucketNameFromUri = pathWithoutGs.substring(0, firstSlashAfterBucketIdx);
     String objectPathRelativeToBucket = pathWithoutGs.substring(firstSlashAfterBucketIdx + 1);
 
+    // Logica Hive partition vs Single file
     final RegExp hivePartitionKeyPattern = RegExp(r'([a-zA-Z0-9_]+)=([^/]+)');
     Match? firstHivePartitionMatch = hivePartitionKeyPattern.firstMatch(objectPathRelativeToBucket);
-
-    String calculatedHiveSourceUriPrefix = "";
-
-    if (firstHivePartitionMatch != null) {
-      // È una struttura partizionata Hive
+    
+    // Determina se è un singolo file Parquet (controlla se termina con .parquet)
+    bool isSingleParquetFile = gcsParquetUri.toLowerCase().endsWith('.parquet');
+    
+    if (isSingleParquetFile) {
+      // È un singolo file Parquet - configura una tabella esterna semplice che punta SOLO a questo file
+      log('Configuring as SINGLE FILE external table for $fullTableIdForLog. Using direct file reference.');
+      externalDataConfig.sourceUris = [gcsParquetUri]; // Usa direttamente l'URI completo del file
+    } else if (firstHivePartitionMatch != null) {
+      // È una struttura partizionata Hive - configura come tabella partizionata
       int startOfFirstHiveKey = firstHivePartitionMatch.start;
-      // Il basePathBeforeHivePartitions è la parte del path dell'oggetto *prima* della prima chiave di partizione
       String basePathBeforeHivePartitions = objectPathRelativeToBucket.substring(0, startOfFirstHiveKey);
       
-      calculatedHiveSourceUriPrefix = 'gs://$bucketNameFromUri/$basePathBeforeHivePartitions';
-      // Assicura che il prefisso finisca con '/'
+      String calculatedHiveSourceUriPrefix = 'gs://$bucketNameFromUri/$basePathBeforeHivePartitions';
       if (!calculatedHiveSourceUriPrefix.endsWith('/')) {
         calculatedHiveSourceUriPrefix += '/';
       }
       
-      // Per le tabelle partizionate Hive con schema dei dati fornito (non autodetect schema completo):
-      // - sourceUris DEVE puntare alla directory base che contiene le cartelle di partizione.
-      // - hivePartitioningOptions.sourceUriPrefix è lo stesso.
-      // - hivePartitioningOptions.mode = 'AUTO' inferisce le colonne di partizione e i loro tipi.
-      externalDataConfig.sourceUris = [calculatedHiveSourceUriPrefix];
+      // Per strutture Hive partizionate, usa il pattern corretto per sourceUris
+      // Questo pattern deve raggiungere tutti i file Parquet in tutte le partizioni
+      externalDataConfig.sourceUris = ['${calculatedHiveSourceUriPrefix}*/*.parquet']; // Pattern ricorsivo per individuare tutti i file Parquet
       externalDataConfig.hivePartitioningOptions = HivePartitioningOptions()
         ..mode = 'AUTO' 
         ..sourceUriPrefix = calculatedHiveSourceUriPrefix; 
 
       log('Configuring AS HIVE PARTITIONED external table for $fullTableIdForLog.');
       log('  Hive Source URI Prefix: $calculatedHiveSourceUriPrefix');
+      log('  Source URIs pattern: ${externalDataConfig.sourceUris}');
       log('  Data Schema (non-partition columns) provided with ${bqDataSchemaFields.length} fields.');
     } else {
-      // Tabella esterna NON partizionata Hive
-      // sourceUris punta a tutti i file Parquet nella "cartella" del gcsParquetUri fornito.
-      String gcsFolderContainingFile = gcsParquetUri.substring(0, gcsParquetUri.lastIndexOf('/') + 1);
+      // È una directory non partizionata con file Parquet - usa pattern con wildcard
+      String gcsFolderContainingFile = gcsParquetUri;
+      if (!gcsFolderContainingFile.endsWith('/')) {
+        gcsFolderContainingFile += '/';
+      }
       externalDataConfig.sourceUris = ['${gcsFolderContainingFile}*.parquet'];
-      log('Configuring as NON-HIVE-PARTITIONED external table for $fullTableIdForLog. Source URIs pattern: ${externalDataConfig.sourceUris}');
+      log('Configuring as NON-HIVE-PARTITIONED DIRECTORY external table for $fullTableIdForLog. Source URIs pattern: ${externalDataConfig.sourceUris}');
     }
 
     // 3. Definisci la risorsa Tabella
@@ -494,6 +499,7 @@ class BigQueryService {
         'tableFullName': '$projectId.$datasetId.${bqApiResultTable.tableReference?.tableId}',
         'gcsSourceUrisApplied': externalDataConfig.sourceUris,
         'hiveSourceUriPrefixApplied': externalDataConfig.hivePartitioningOptions?.sourceUriPrefix,
+        'isSingleParquetFile': isSingleParquetFile,
       };
 
     } catch (e, stackTrace) {
