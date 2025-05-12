@@ -16,7 +16,7 @@ import base64
 import traceback # Per un logging degli errori più dettagliato
 
 # Configurazione Globale
-SILVER_BUCKET = "soy-transducer-456512-t0-easyquery-silver" # Assicurati che questo sia il nome corretto
+SILVER_BUCKET = "silver-layer-bucket"
 storage_client = storage.Client()
 
 # --- FUNZIONI HELPER ---
@@ -182,17 +182,32 @@ def bronze_to_silver(request: Request):
         bucket_name, *blob_parts = full_path.split("/", 1)
         if not blob_parts or not blob_parts[0]: # blob_parts[0] è blob_name
             return ({"status": "error", "error": "Invalid path format. File path part is missing after bucket name."}, 400, response_cors_headers)
-        blob_name = blob_parts[0]
-        
-        file_name_original = os.path.basename(blob_name)
+        blob_name_without_leading_slash = blob_parts[0] 
+
+        # !!! MODIFICA CRUCIALE QUI !!!
+        # Dato che i tuoi oggetti in GCS iniziano con "/", ricostruisci il blob_name con lo slash iniziale.
+        blob_name = f"/{blob_name_without_leading_slash.lstrip('/')}"
+        # .lstrip('/') è una precauzione nel caso blob_name_without_leading_slash fosse vuoto o iniziasse già con / per errore
+
+        print(f"Python bronze-to-silver: Original path from Dart was '{full_path}'")
+        print(f"Python bronze-to-silver: Derived bucket_name='{bucket_name}'")
+        print(f"Python bronze-to-silver: Derived blob_name_without_leading_slash='{blob_name_without_leading_slash}'")
+        print(f"Python bronze-to-silver: Assuming actual blob name in GCS starts with '/', trying: '{blob_name}'")
+
+        file_name_original = os.path.basename(blob_name) # Usa il nome con lo slash per coerenza
         file_extension_original = os.path.splitext(file_name_original)[1].lower().lstrip('.')
-        
+
         bronze_bucket_obj = storage_client.bucket(bucket_name)
-        bronze_blob = bronze_bucket_obj.blob(blob_name)
+        bronze_blob = bronze_bucket_obj.blob(blob_name) # <--- USA IL NOME CORRETTO DEL BLOB
+
+        print(f"Python bronze-to-silver: Checking existence of gs://{bucket_name}{blob_name}") # Nota: gs://bucket/path (path già inizia con /)
 
         if not bronze_blob.exists():
-            return ({"status": "error", "error": f"File not found in bronze: gs://{bucket_name}/{blob_name}"}, 404, response_cors_headers)
+            # Se ancora non lo trova, i permessi o un errore di battitura SUL NOME EFFETTIVO IN GCS sono il problema.
+            return ({"status": "error", "error": f"File not found in bronze: gs://{bucket_name}{blob_name}"}, 404, response_cors_headers)
 
+        print(f"Python bronze-to-silver: File gs://{bucket_name}{blob_name} confirmed to exist.")
+        
         # Ricarica i metadati del blob per avere content_type e size aggiornati
         bronze_blob.reload() 
         blob_content_type = bronze_blob.content_type or "application/octet-stream"

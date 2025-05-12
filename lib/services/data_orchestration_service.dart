@@ -59,7 +59,7 @@ class DataOrchestrationService {
         // Esegui le trasformazioni Bronze → Silver
         for (String filePath in contextAnalysis['suggested_files']) {
           final result = await _transformBronzeToSilver(filePath);
-          if (result != null) {
+           if (result != null && result['status'] == 'success') { 
             transformedFiles.add(result['silver_path']);
             
             // Ottieni schema del nuovo file Silver convertito
