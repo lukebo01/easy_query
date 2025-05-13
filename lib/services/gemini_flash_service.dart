@@ -2,46 +2,35 @@ import 'dart:convert';
 import 'package:easy_query/services/rest_service.dart';
 
 class GeminiFlashService {
-  final RestService _restService;
-  final String _apiKey;
+  final RestService restService;
+  final String apiKey;
 
-  GeminiFlashService({required RestService restService, required String apiKey})
-    : _restService = restService,
-      _apiKey = apiKey;
+  GeminiFlashService({
+    required this.restService,
+    required this.apiKey,
+  });
 
-  /// Translate user question to English if needed
-  Future<String> translateToEnglish(String userQuestion) async {
+  Future<String> generateText(String prompt) async {
     final payload = {
       'contents': [
         {
           'parts': [
             {
-              'text': '''
-                If the following text is not in English, translate it to English. If it's already in English, return it unchanged.
-                Text: $userQuestion
-                Return only the translated or original text without any explanations.
-              ''',
-            },
-          ],
-        },
+              'text': prompt,
+            }
+          ]
+        }
       ],
-      'generationConfig': {'temperature': 0.1},
     };
 
-    final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+    final response = await restService.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey',
       payload,
     );
 
-    if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      return response['candidates'][0]['content']['parts'][0]['text'].trim();
-    }
-
-    // If translation fails, return original text
-    return userQuestion;
+    return response['candidates'][0]['content']['parts'][0]['text'];
   }
 
-  /// Analyze schemas and sample data to identify relevant tables for the query
   Future<Map<String, dynamic>> analyzeQueryContext(
     String userQuestion,
     String databaseSchema,
@@ -49,113 +38,97 @@ class GeminiFlashService {
     List<String> tableNames,
     Map<String, List<Map<String, dynamic>>> sampleData,
   ) async {
-    // Convert sample data to a string format
-    final sampleDataStr = jsonEncode(sampleData);
+    // Converti sampleData in una stringa JSON leggibile
+    String sampleDataStr = '';
+    sampleData.forEach((table, data) {
+      if (data.isNotEmpty) {
+        sampleDataStr += 'Table: $table\n';
+        sampleDataStr += 'Sample rows (${data.length}):\n';
+        sampleDataStr += '${data.take(5).map((row) => row.toString()).join('\n')}\n\n';
+      }
+    });
 
     final payload = {
       'contents': [
         {
           'parts': [
             {
-              'text': '''
-            You are a data analyst tasked with identifying ALL relevant tables for a query and their precise relationships. You'll analyze the user's question, database schemas from tabels in BigQuery, files in Google Cloud Storage and sample data to provide a comprehensive analysis.
-            
-            User question: $userQuestion
+              'text': 
+              """
+              Analizza la seguente domanda:
+              
+              $userQuestion
+              
+              Cloud files and their metadata: $cloudFilesAndMetadata
+              
+              Database schemas: $databaseSchema
+              
+              Sample data from tables: $sampleDataStr
+              
+              Analyze the question, database schemas, cloud files and sample data thoroughly, then:
+              1. Identify ALL tables that could be relevant to the user's question (be inclusive rather than exclusive)
+              2. For each relevant table, identify the key columns that should be included
+              3. Look for semantic connections between columns by examining both column names AND actual data values
+              4. For join conditions, don't rely only on column names but analyze the actual data to find potential foreign key relationships
+              5. Consider fuzzy matching between similar values in different tables (e.g., "Electronics" in one table might correspond to "Electronic Devices" in another)
+              6. Determine precise join conditions based on the actual data values, not just schema similarities
+              7. Evaluate if cloud files are needed for the query considering their name, path, date and metadata; they will be trasformed in tables so suggest them ONLY IF NEEDED
+              8. Cloud file names should be written with full and correct path, including the folder structure
+              9. NEVER include file names form cloud files into the relevant tables list, use only the table names from the schemas for that scope
 
-            Cloud files and their metadata: $cloudFilesAndMetadata
-            
-            Database schemas: $databaseSchema
-            
-            Sample data from tables: $sampleDataStr
-            
-            Analyze the question, database schemas, cloud files and sample data thoroughly, then:
-            1. Identify ALL tables that could be relevant to the user's question (be inclusive rather than exclusive)
-            2. For each relevant table, identify the key columns that should be included
-            3. Look for semantic connections between columns by examining both column names AND actual data values
-            4. For join conditions, don't rely only on column names but analyze the actual data to find potential foreign key relationships
-            5. Consider fuzzy matching between similar values in different tables (e.g., "Electronics" in one table might correspond to "Electronic Devices" in another)
-            6. Determine precise join conditions based on the actual data values, not just schema similarities
-            7. Evaluate if cloud files are needed for the query considering their name, path, date and metadata; they will be trasformed in tables so suggest them ONLY IF NEEDED
-            8. Cloud file names should be written with full and correct path, including the folder structure
-            9. NEVER include file names form cloud files into the relevant tables list, use only the table names from the schemas for that scope
-
-            IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
-            
-            Return your analysis as a JSON object with this structure:
-            {
-              "suggested_files": ["file1", "file2", "file3"],
-              "relevant_tables": ["table1", "table2", "table3"],
-              "relevant_columns": {
-                "table1": ["col1", "col2"],
-                "table2": ["col1", "col3"],
-                "table3": ["col1", "col4"]
-              },
-              "joins": [
-                {
-                  "table1": "table1",
-                  "column1": "id",
-                  "table2": "table2",
-                  "column2": "table1_id",
-                  "join_type": "LEFT",
-                  "matching_logic": "exact/fuzzy/substring",
-                  "data_example": "Sample values that match between these columns"
-                }
-              ],
-              "unions": [
-                {
-                  "tables": ["table1", "table3"],
-                  "mapping": {
-                    "table1.col1": "table3.col4",
-                    "table1.col2": "table3.col1"
-                  },
-                  "data_examples": ["Example of semantically matching values"]
-                }
-              ],
-              "domain_context": "comprehensive description of what this data represents",
-              "value_transformations": [
-                {
-                  "table": "table1",
-                  "column": "column1",
-                  "transformation": "CAST as STRING/NUMERIC/etc or other preprocessing needed"
-                }
-              ]
+              IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
+              
+              Return your analysis as a JSON object with this structure:
+              {
+                "suggested_files": ["file1", "file2", "file3"],
+                "relevant_tables": ["table1", "table2", "table3"],
+                "relevant_columns": {
+                  "table1": ["col1", "col2"],
+                  "table2": ["col1", "col3"],
+                  "table3": ["col1", "col4"]
+                },
+                "joins": [
+                  {
+                    "table1": "table1",
+                    "column1": "id",
+                    "table2": "table2",
+                    "column2": "table1_id",
+                    "join_type": "LEFT",
+                    "matching_logic": "exact/fuzzy/substring",
+                  }
+                ]
+              }
+              """
             }
-          ''',
-            },
           ],
         },
       ],
-      'generationConfig': {'temperature': 0.3, 'topP': 0.9, 'topK': 40},
     };
 
-    final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+    final response = await restService.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey',
       payload,
     );
 
-    if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      final analysisText =
-          response['candidates'][0]['content']['parts'][0]['text'];
-      // Extract the JSON part from the response
-      final jsonStartIndex = analysisText.indexOf('{');
-      final jsonEndIndex = analysisText.lastIndexOf('}') + 1;
-      if (jsonStartIndex >= 0 && jsonEndIndex > jsonStartIndex) {
-        final jsonStr = analysisText.substring(jsonStartIndex, jsonEndIndex);
-        try {
-          return jsonDecode(jsonStr);
-        } catch (e) {
-          throw Exception('Failed to parse context analysis: $e');
-        }
-      }
+    final text = response['candidates'][0]['content']['parts'][0]['text'];
+    
+    // Estrai il JSON dalla risposta
+    final jsonStartIndex = text.indexOf('{');
+    final jsonEndIndex = text.lastIndexOf('}') + 1;
+    
+    if (jsonStartIndex < 0 || jsonEndIndex <= jsonStartIndex) {
+      throw Exception('Risposta non valida: impossibile estrarre JSON');
     }
-
-    throw Exception('Failed to analyze query context');
+    
+    final jsonStr = text.substring(jsonStartIndex, jsonEndIndex);
+    final contextAnalysis = json.decode(jsonStr);
+    
+    return contextAnalysis as Map<String, dynamic>;
   }
 
-  /// Generate a SQL query based on the user's question and database schema
   Future<String> generateSqlQuery(
     String userQuestion,
-    String databaseSchema,
+    String schemas,
     String tableNames, {
     Map<String, List<Map<String, dynamic>>>? sampleData,
     Map<String, dynamic>? contextAnalysis,
@@ -170,7 +143,7 @@ class GeminiFlashService {
             
             User question: $userQuestion
 
-            Database schemas: $databaseSchema
+            Database schemas: $schemas
             
             Table names: $tableNames
             
@@ -204,6 +177,29 @@ class GeminiFlashService {
                INCORRECT EXAMPLE (THIS WILL FAIL): WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
                
                ALWAYS PERFORM THIS CONVERSION for date comparisons involving the 'date_partition' STRING column.
+               
+            3. MANDATORY PARTITION FILTERS IN JOINS:
+               When joining tables that are partitioned on 'date_partition', you MUST apply partition filters to EACH table 
+               in the query, not just the first table. Failing to do so will cause an error.
+               
+               CORRECT JOIN EXAMPLE:
+               ```
+               SELECT t1.col1, t2.col2 
+               FROM table1 AS t1 
+               JOIN table2 AS t2 ON t1.id = t2.id 
+               WHERE PARSE_DATE('%Y/%m/%d', t1.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
+                 AND PARSE_DATE('%Y/%m/%d', t2.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
+               ```
+               
+               INCORRECT JOIN EXAMPLE:
+               ```
+               SELECT t1.col1, t2.col2 
+               FROM table1 AS t1 
+               JOIN table2 AS t2 ON t1.id = t2.id 
+               WHERE PARSE_DATE('%Y/%m/%d', t1.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
+               ```
+               
+               The incorrect example will fail because table2's date_partition is not filtered.
 
             Generate a single SQL query that answers the user's question.
             Ensure that your query:
@@ -216,7 +212,8 @@ class GeminiFlashService {
             7. Sorts results in a logical order
             8. Limits the result set if appropriate
             9. Uses appropriate functions for text manipulation, date handling, etc.
-            10. Does not include any comments or explanations in the SQL itself
+            10. Applies partition filters to EVERY table in the query that has a date_partition column
+            11. Does not include any comments or explanations in the SQL itself
             
             Return only the SQL query without any additional text or explanations.
               ''',
@@ -227,8 +224,8 @@ class GeminiFlashService {
       'generationConfig': {'temperature': 0.2, 'topP': 0.8, 'topK': 40},
     };
 
-    final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$_apiKey',
+    final response = await restService.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey',
       payload,
     );
 
@@ -242,7 +239,10 @@ class GeminiFlashService {
   }
   
   /// Analyze query results to generate insights
-  Future<String> analyzeQueryResults(String sqlQuery, List<Map<String, dynamic>> results) async {
+  Future<String> analyzeQueryResults(
+    String sqlQuery, 
+    List<Map<String, dynamic>> results
+  ) async {
     final payload = {
       'contents': [
         {
@@ -263,15 +263,15 @@ class GeminiFlashService {
             4. Any limitations of the data or analysis
             
             Format your analysis with clear headings and bullet points where appropriate.
-            '''
+              '''
             },
           ],
         },
       ]
     };
 
-    final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
+    final response = await restService.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey',
       payload,
     );
 
@@ -282,37 +282,11 @@ class GeminiFlashService {
     throw Exception('Failed to analyze query results');
   }
   
-  /// Generate general text based on a prompt 
-  Future<String> generateText(String prompt) async {
-    final payload = {
-      'contents': [
-        {
-          'parts': [
-            {
-              'text': prompt,
-            },
-          ],
-        },
-      ]
-    };
-
-    final response = await _restService.post(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_apiKey',
-      payload,
-    );
-
-    if (response['candidates'] != null && response['candidates'].isNotEmpty) {
-      return response['candidates'][0]['content']['parts'][0]['text'].trim();
-    }
-
-    throw Exception('Failed to generate text');
-  }
-  
   /// Suggest a file path based on content analysis
    Future<String> suggestFilePath(
     String bucketStructure,
-    Map<String, dynamic> fileMetadata,
-    String? fileContent,
+    Map<String, String> fileMetadata,
+    String fileContent,
   ) async {
     try {
       // Build prompt for the LLM

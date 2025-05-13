@@ -20,3 +20,6 @@ Pillow>=9.0.0
 requests==2.31.0
 
 gcsfs
+
+# Aggiungi alle dipendenze esistenti
+google-cloud-dataplex==2.3.0

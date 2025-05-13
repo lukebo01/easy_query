@@ -4,6 +4,7 @@ import datetime
 import json
 import pandas as pd
 from google.cloud import storage
+from google.cloud import dataplex_v1
 import functions_framework
 from flask import Request # Per il type hint di request
 import io # Per BytesIO
@@ -12,6 +13,7 @@ from PIL import Image # Per le immagini
 import base64 # Per la codifica base64 delle immagini
 import traceback # Per un logging degli errori più dettagliato
 from typing import List, Dict, Any, Optional
+import time
 
 # --- CONFIGURAZIONE GLOBALE ---
 # Bucket GCS dove risiedono i dati Silver.
@@ -22,9 +24,62 @@ SILVER_BUCKET_NAME = "silver-layer-bucket"
 SILVER_DATA_FILES_ROOT_PREFIX = "silver_data_files"  # Es: gs://silver-layer-bucket/silver_data_files/...
 SILVER_MANIFESTS_ROOT_PREFIX = "silver_manifests" # Es: gs://silver-layer-bucket/silver_manifests/...
 
-storage_client = storage.Client()
+# Configurazione Dataplex
+DATAPLEX_LAKE = "silver_lake"  # Nome del tuo Lake Dataplex
+DATAPLEX_ZONE = "silver_zone"  # Nome della tua Zone Dataplex
+DATAPLEX_LOCATION = "europe-central2"  # Regione Dataplex, es. "europe-central2"
 
-# --- FUNZIONI HELPER ---
+storage_client = storage.Client()
+# Inizializzazione client Dataplex
+dataplex_client = None
+
+# --- FUNZIONI PER DATAPLEX ---
+def _initialize_dataplex_client():
+    """Inizializza il client Dataplex"""
+    global dataplex_client
+    if dataplex_client is None:
+        dataplex_client = dataplex_v1.DataplexServiceClient()
+    return dataplex_client
+
+def trigger_dataplex_discovery(project_id: str, location: str, lake_name: str, zone_name: str):
+    """
+    Avvia una scansione Dataplex su una zona specifica
+    Parametri:
+    - project_id: ID progetto GCP
+    - location: Regione (es. "europe-central2")
+    - lake_name: Nome del lake Dataplex
+    - zone_name: Nome della zone Dataplex
+    """
+    client = _initialize_dataplex_client()
+    
+    # Formatta il nome completo della zona Dataplex
+    zone_name_formatted = f"projects/{project_id}/locations/{location}/lakes/{lake_name}/zones/{zone_name}"
+    
+    try:
+        print(f"Avvio scansione Dataplex per zona: {zone_name_formatted}")
+        
+        # Crea la richiesta per avviare la discovery sulla zona
+        request = dataplex_v1.TriggerDiscoveryRequest(
+            name=zone_name_formatted
+        )
+        
+        # Avvia la scansione di discovery
+        operation = client.trigger_discovery(request=request)
+        
+        # Attendi il completamento dell'operazione (con timeout)
+        print("Scansione Dataplex avviata, attendere il completamento...")
+        result = operation.result(timeout=120)  # Timeout di 120 secondi
+        
+        print(f"Scansione Dataplex completata con successo: {result}")
+        return True, "Scansione Dataplex completata con successo"
+    
+    except Exception as e:
+        error_msg = f"Errore durante l'avvio della scansione Dataplex: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        return False, error_msg
+
+# --- FUNZIONI HELPER ESISTENTI ---
 def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
     """
     Determina i componenti del percorso gerarchico (dominio, categoria, contesto, partizione data)
@@ -140,6 +195,7 @@ def bronze_to_silver(request: Request):
     """
     Funzione HTTP per convertire file dal bucket bronze al bucket silver.
     Salva i dati Parquet in una struttura di cartelle e i manifest JSON in una struttura parallela.
+    Poi avvia una scansione Dataplex per aggiornare automaticamente il catalogo.
     """
     # Gestione della richiesta preflight CORS (OPTIONS)
     if request.method == 'OPTIONS':
@@ -200,6 +256,21 @@ def bronze_to_silver(request: Request):
         original_blob_content_type = bronze_blob.content_type or "application/octet-stream"
         original_blob_size = bronze_blob.size
 
+        # Creazione file temporaneo e download del contenuto
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension_original}") as tmp_in:
+            tmp_in_path = tmp_in.name
+            print(f"Downloading bronze file to temporary path: {tmp_in_path}")
+            
+        # Download del file da GCS al percorso temporaneo
+        bronze_blob.download_to_filename(tmp_in_path)
+        print(f"Downloaded bronze file: gs://{bronze_bucket_name}{blob_name_in_gcs} to {tmp_in_path}")
+        
+        # Verifica che il file temporaneo esista
+        if not os.path.exists(tmp_in_path) or not os.path.getsize(tmp_in_path) > 0:
+            error_msg = f"Failed to download file or file is empty: {tmp_in_path}"
+            print(error_msg)
+            return ({"status": "error", "error": error_msg}, 500, response_cors_headers)
+
         path_suffix_components = determine_silver_path_components(
             blob_name_in_gcs,
             file_extension_original,
@@ -215,48 +286,15 @@ def bronze_to_silver(request: Request):
             print(f"Using custom data prefix: {silver_data_files_base_path}")
 
 
+        # Dopo aver caricato il file dal bronze bucket e prima di elaborarlo,
+        # determiniamo il nome della tabella BigQuery che verrà creata
         base_filename_no_ext = os.path.splitext(file_name_original_ext)[0]
-        silver_parquet_filename = f"{base_filename_no_ext}.parquet"
-
-        silver_parquet_full_gcs_path = f"{silver_data_files_base_path}/{silver_parquet_filename}"
-        silver_manifest_full_gcs_path = f"{silver_manifests_base_path}/_partition_manifest.json"
-
-        if not force_processing:
-            silver_blob_check = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_parquet_full_gcs_path)
-            if silver_blob_check.exists():
-                print(f"File {silver_parquet_full_gcs_path} already processed. Attempting to read its schema.")
-                cols_from_existing_with_types = []
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_exist:
-                        silver_blob_check.download_to_filename(tmp_exist.name)
-                        parquet_file_df = pd.read_parquet(tmp_exist.name)
-                        os.unlink(tmp_exist.name)
-
-                    for col_name_ex, dtype_ex in parquet_file_df.dtypes.items():
-                        dtype_str_ex = str(dtype_ex)
-                        simple_type_ex = "STRING" # Default
-                        if "bool" in dtype_str_ex: simple_type_ex = "BOOLEAN"
-                        elif "int" in dtype_str_ex: simple_type_ex = "INT64"
-                        elif "float" in dtype_str_ex: simple_type_ex = "FLOAT64"
-                        elif "datetime" in dtype_str_ex: simple_type_ex = "TIMESTAMP"
-                        cols_from_existing_with_types.append({"name": col_name_ex, "type": simple_type_ex})
-                    print(f"Schema read from existing Parquet: {cols_from_existing_with_types}")
-
-                except Exception as e_schema:
-                    print(f"Warning: Could not read schema from existing Parquet gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}: {e_schema}")
-
-                return ({"status": "success",
-                        "message": f"File already processed: gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}",
-                        "silver_path": f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}",
-                        "columns": cols_from_existing_with_types,
-                        "silver_path_prefix_base": silver_data_files_base_path
-                        }, 200, response_cors_headers)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension_original}" if file_extension_original else "") as tmp_in:
-            tmp_in_path = tmp_in.name
-        bronze_blob.download_to_filename(tmp_in_path)
-        print(f"Downloaded gs://{bronze_bucket_name}{blob_name_in_gcs} to {tmp_in_path}")
-
+        # Sanitize per BigQuery (solo lettere, numeri e underscore)
+        safe_table_id = ''.join(c if c.isalnum() else '_' for c in base_filename_no_ext)
+        if not safe_table_id[0].isalpha():
+            safe_table_id = 'tbl_' + safe_table_id
+            
+        # Elaborazione del file in base al tipo
         df_processed = None
         if file_extension_original == "txt":
             with open(tmp_in_path, 'r', encoding='utf-8', errors='replace') as f_txt:
@@ -318,82 +356,242 @@ def bronze_to_silver(request: Request):
             df_processed['deep_processed_ok'] = df_processed['deep_processed_ok'].astype(bool)
 
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_out:
-            tmp_out_path = tmp_out.name
-        df_processed.to_parquet(tmp_out_path, index=False, engine='pyarrow')
-
-        silver_blob_data_upload = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_parquet_full_gcs_path)
-        silver_blob_data_upload.upload_from_filename(tmp_out_path)
-        print(f"Uploaded Parquet to gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}")
-
-        manifest_blob = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_manifest_full_gcs_path)
-        current_manifest_entries = []
-        if manifest_blob.exists():
+        # Quando abbiamo ottenuto il DataFrame processato, separiamo i metadati dai dati
+        if df_processed is not None and not df_processed.empty:
+            # Identifica le colonne di metadati da spostare nel manifest
+            metadata_columns = [
+                "silver_ingestion_ts", "bronze_source_uri", "original_file_extension",
+                "silver_data_domain", "silver_file_category", "deep_processed_ok"
+                # Aggiungi qui altre colonne di metadati che non dovrebbero essere nel Parquet
+            ]
+            
+            # Estrai i metadati prima di rimuoverli dal DataFrame
+            metadata_values = {}
+            for col in metadata_columns:
+                if col in df_processed.columns:
+                    # Prendi il primo valore non nullo, o None se tutti nulli o colonna non presente
+                    values = df_processed[col].dropna()
+                    if not values.empty:
+                        metadata_value = values.iloc[0]
+                        # Converti datetime in formato ISO per JSON
+                        if isinstance(metadata_value, pd.Timestamp):
+                            metadata_value = metadata_value.isoformat()
+                        metadata_values[col] = metadata_value
+            
+            # Crea una copia del DataFrame per il manifest che include solo i metadati
+            df_metadata = pd.DataFrame([metadata_values])
+            
+            # Rimuovi le colonne di metadati dal DataFrame da salvare come Parquet
+            metadata_cols_to_remove = [col for col in metadata_columns if col in df_processed.columns]
+            df_data_only = df_processed.drop(columns=metadata_cols_to_remove, errors='ignore')
+            
+            # Gestione delle colonne problematiche prima di salvare in Parquet
+            # Elenco delle colonne che potrebbero contenere tipi misti
+            potential_mixed_type_columns = ["year_founded", "established_date", "registration_id", "reference_code"]
+            
+            for col in df_data_only.columns:
+                # Gestione specifica per colonne con potenziali tipi misti
+                if col in potential_mixed_type_columns or df_data_only[col].dtype == 'object':
+                    # Per colonne di tipo object, controlliamo se ci sono tipi misti
+                    try:
+                        # Se la colonna contiene tutti valori numerici, converte in float
+                        df_data_only[col] = pd.to_numeric(df_data_only[col], errors='coerce')
+                        # Se ci sono valori NaN dopo conversione (originariamente non numerici), converte tutta la colonna in string
+                        if df_data_only[col].isna().any():
+                            # Salva lo stato originale della colonna per non perdere valori non numerici
+                            original_values = df_processed[col].copy()
+                            # Ripristina i valori originali e converte tutto in stringa
+                            df_data_only[col] = original_values.astype(str)
+                    except Exception as e_col:
+                        print(f"Conversione della colonna '{col}' a formato omogeneo fallita: {e_col}. Conversione in stringa.")
+                        # In caso di errore, converti in stringa
+                        df_data_only[col] = df_data_only[col].astype(str)
+            
+            # Sostituisci tutti i valori nan/None con stringhe vuote per le colonne di tipo object
+            for col in df_data_only.select_dtypes(include=['object']):
+                df_data_only[col] = df_data_only[col].fillna('')
+            
+            print(f"Tipi di dati nel DataFrame prima del salvataggio Parquet: {df_data_only.dtypes}")
+            
+            # Salva il file Parquet (solo dati, no metadati)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_out:
+                tmp_out_path = tmp_out.name
+            
+            # Uso di una gestione degli errori per il salvataggio
             try:
-                manifest_content = manifest_blob.download_as_text()
-                loaded_manifest = json.loads(manifest_content)
-                if isinstance(loaded_manifest, list):
-                    current_manifest_entries = loaded_manifest
+                df_data_only.to_parquet(tmp_out_path, index=False, engine='pyarrow')
+            except Exception as e_parquet:
+                print(f"Errore nel salvataggio Parquet, tentativo con conversione estrema: {e_parquet}")
+                # Ultima risorsa: converti tutte le colonne in stringa
+                for col in df_data_only.columns:
+                    if df_data_only[col].dtype != 'int64' and df_data_only[col].dtype != 'float64' and df_data_only[col].dtype != 'bool':
+                        df_data_only[col] = df_data_only[col].astype(str)
+                df_data_only.to_parquet(tmp_out_path, index=False, engine='pyarrow')
+            
+            silver_parquet_filename = f"{base_filename_no_ext}.parquet"
+            silver_parquet_full_gcs_path = f"{silver_data_files_base_path}/{silver_parquet_filename}"
+            silver_manifest_full_gcs_path = f"{silver_manifests_base_path}/_partition_manifest.json"
+            
+            # Carica il file Parquet su GCS
+            silver_blob_data_upload = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_parquet_full_gcs_path)
+            silver_blob_data_upload.upload_from_filename(tmp_out_path)
+            print(f"Uploaded Parquet to gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}")
+            
+            # Aggiorna il manifest con i metadati
+            manifest_blob = storage_client.bucket(SILVER_BUCKET_NAME).blob(silver_manifest_full_gcs_path)
+            current_manifest_entries = []
+            if manifest_blob.exists():
+                try:
+                    manifest_content = manifest_blob.download_as_text()
+                    loaded_manifest = json.loads(manifest_content)
+                    if isinstance(loaded_manifest, list):
+                        current_manifest_entries = loaded_manifest
+                    else:
+                        print(f"Warning: Manifest {silver_manifest_full_gcs_path} was not a list. Reinitializing.")
+                except Exception as e_m_load:
+                    print(f"Warning: Could not load/parse manifest {silver_manifest_full_gcs_path}: {e_m_load}. Reinitializing.")
+            
+            uri_parquet_in_silver = f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}"
+            current_manifest_entries = [e for e in current_manifest_entries if e.get("silver_file_uri") != uri_parquet_in_silver]
+            
+            # Converti i tipi NumPy prima della serializzazione JSON
+            def json_serializable(obj):
+                """Converti tipi NumPy e altri non serializzabili in tipi Python standard"""
+                if hasattr(obj, 'item'):  # NumPy scalars hanno il metodo item()
+                    return obj.item()  # Converte np.bool_, np.int64, ecc. in tipi Python equivalenti
+                elif isinstance(obj, (pd.Series, pd.DataFrame)):
+                    return obj.to_dict()
+                elif isinstance(obj, pd.Timestamp):
+                    return obj.isoformat()
+                elif hasattr(obj, 'tolist'):  # Per array NumPy
+                    return obj.tolist()
+                return obj
+            
+            # Schema DataFrame con conversione valori NumPy
+            safe_schema = {}
+            for col, dtype in df_data_only.dtypes.items():
+                safe_schema[col] = str(dtype)
+            
+            # Aggiungi tutti i metadati nel manifest
+            manifest_entry = {
+                "silver_file_uri": uri_parquet_in_silver,
+                "bronze_source_uri": f"gs://{bronze_bucket_name}{blob_name_in_gcs}",
+                "record_count": int(len(df_data_only)),  # Conversione esplicita per sicurezza
+                "silver_processed_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "original_content_type": original_blob_content_type,
+                "original_file_size_bytes": int(original_blob_size),  # Conversione esplicita
+                "silver_df_schema": safe_schema,
+                "silver_data_path_base": silver_data_files_base_path,
+                "metadata": json.loads(json.dumps(metadata_values, default=json_serializable))  # Conversione sicura
+            }
+            
+            current_manifest_entries.append(manifest_entry)
+            manifest_json = json.dumps(current_manifest_entries, default=json_serializable, indent=2)
+            manifest_blob.upload_from_string(manifest_json, content_type="application/json")
+            print(f"Manifest updated at gs://{SILVER_BUCKET_NAME}/{silver_manifest_full_gcs_path}")
+
+            # --- AVVIO SCANSIONE DATAPLEX ---
+            dataplex_success = False
+            dataplex_info = "Scansione Dataplex non eseguita"
+            
+            # Identifica il project_id corrente
+            project_id = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            if not project_id:
+                print("ATTENZIONE: Impossibile determinare il project_id dagli env vars.")
+                project_id = "soy-transducer-456512-t0"  # Fallback project ID, da personalizzare
+            
+            try:
+                # Avvia la scansione Dataplex per aggiornare automaticamente il catalogo
+                print(f"Avvio scansione Dataplex per zona {DATAPLEX_ZONE} in lake {DATAPLEX_LAKE}")
+                dataplex_success, dataplex_info = trigger_dataplex_discovery(
+                    project_id=project_id,
+                    location=DATAPLEX_LOCATION,
+                    lake_name=DATAPLEX_LAKE,
+                    zone_name=DATAPLEX_ZONE
+                )
+                
+                if dataplex_success:
+                    print(f"Scansione Dataplex avviata con successo. Dataplex aggiornerà automaticamente le tabelle BigQuery.")
                 else:
-                    print(f"Warning: Manifest {silver_manifest_full_gcs_path} was not a list. Reinitializing.")
-            except Exception as e_m_load:
-                print(f"Warning: Could not load/parse manifest {silver_manifest_full_gcs_path}: {e_m_load}. Reinitializing.")
-
-        uri_parquet_in_silver = f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}"
-        current_manifest_entries = [e for e in current_manifest_entries if e.get("silver_file_uri") != uri_parquet_in_silver]
-
-        current_manifest_entries.append({
-            "silver_file_uri": uri_parquet_in_silver,
-            "bronze_source_uri": f"gs://{bronze_bucket_name}{blob_name_in_gcs}",
-            "record_count": len(df_processed),
-            "silver_processed_at": datetime.datetime.utcnow().isoformat() + "Z",
-            "original_content_type": original_blob_content_type,
-            "original_file_size_bytes": original_blob_size,
-            "silver_df_schema": {col: str(dtype) for col, dtype in df_processed.dtypes.items()},
-            "silver_data_path_base": silver_data_files_base_path
-        })
-        manifest_blob.upload_from_string(json.dumps(current_manifest_entries, indent=2), content_type="application/json")
-        print(f"Manifest updated at gs://{SILVER_BUCKET_NAME}/{silver_manifest_full_gcs_path}")
-
-        delete_msg = f"Original gs://{bronze_bucket_name}{blob_name_in_gcs} kept."
-        if data_payload.get("delete_original", False) is True:
-            bronze_blob.delete()
-            delete_msg = f"Original gs://{bronze_bucket_name}{blob_name_in_gcs} deleted."
-            print(delete_msg)
-
-        # *** INIZIO MODIFICA PER INCLUDERE I TIPI DELLE COLONNE NELLA RISPOSTA ***
-        processed_columns_with_types = []
-        for col_name, dtype in df_processed.dtypes.items():
-            dtype_str = str(dtype)
-            # Mappa i tipi Pandas a tipi BigQuery standard come stringhe
-            simple_type = "STRING" # Fallback generico
-            if "bool" in dtype_str:
-                simple_type = "BOOLEAN"
-            elif "int" in dtype_str: # include int8, int16, int32, int64
-                simple_type = "INT64" # o INTEGER
-            elif "float" in dtype_str: # include float16, float32, float64
-                simple_type = "FLOAT64" # o FLOAT
-            elif "datetime" in dtype_str or "timestamp" in dtype_str: # Pandas datetime64[ns], datetime64[ns, UTC], ecc.
-                simple_type = "TIMESTAMP"
-            # object è più ambiguo, potrebbe essere STRING, JSON, ARRAY, ecc.
-            # Per la creazione di tabelle esterne, trattarlo come STRING è spesso più sicuro inizialmente.
-            # Se sai che sono JSON validi, potresti usare "JSON".
-            elif "object" in dtype_str:
-                simple_type = "STRING"
-            # Aggiungi altre mappature se necessario (es. per 'category', 'timedelta')
-
-            processed_columns_with_types.append({"name": col_name, "type": simple_type})
-        # *** FINE MODIFICA ***
-
-        response_data = {
-            "status": "success",
-            "message": f"Processed gs://{bronze_bucket_name}{blob_name_in_gcs} to Silver: {uri_parquet_in_silver}. {delete_msg}",
-            "silver_path": uri_parquet_in_silver,
-            "columns": processed_columns_with_types, # MODIFICATO: ora invia nomi e tipi
-            "record_count": len(df_processed),
-            "silver_path_prefix_base": silver_data_files_base_path
-        }
-        return (response_data, 200, response_cors_headers)
+                    print(f"Avviso: Scansione Dataplex non riuscita: {dataplex_info}")
+            
+            except Exception as e_dataplex:
+                dataplex_success = False
+                dataplex_info = f"Errore durante la scansione Dataplex: {str(e_dataplex)}"
+                traceback.print_exc()
+            
+            # Prepara le colonne per la risposta
+            processed_columns_with_types = []
+            for col_name, dtype in df_data_only.dtypes.items():
+                dtype_str = str(dtype)
+                simple_type = "STRING"  # Fallback generico
+                if "bool" in dtype_str:
+                    simple_type = "BOOLEAN"
+                elif "int" in dtype_str:
+                    simple_type = "INT64"
+                elif "float" in dtype_str:
+                    simple_type = "FLOAT64"
+                elif "datetime" in dtype_str or "timestamp" in dtype_str:
+                    simple_type = "TIMESTAMP"
+                elif "object" in dtype_str:
+                    simple_type = "STRING"
+                processed_columns_with_types.append({"name": col_name, "type": simple_type})
+            
+            # Calcola il nome della tabella BigQuery che Dataplex creerà, basato sul percorso delle cartelle
+            # Esempio: silver_data_files/it/document/text_file/date_partition=2025/05/13 → silver_data_files_it_document_text_file
+            dataplex_table_name_parts = []
+            
+            # Aggiungi il prefisso root (silver_data_files)
+            dataplex_table_name_parts.append(SILVER_DATA_FILES_ROOT_PREFIX)
+            
+            # Trova l'indice dove inizia la partizione Hive
+            partition_index = -1
+            for i, component in enumerate(path_suffix_components):
+                if component.startswith("date_partition="):
+                    partition_index = i
+                    break
+            
+            # Aggiungi solo i componenti PRIMA della partizione Hive
+            if partition_index >= 0:
+                dataplex_table_name_parts.extend(path_suffix_components[:partition_index])
+            else:
+                # Se non c'è partizione, aggiungi tutti i componenti
+                dataplex_table_name_parts.extend(path_suffix_components)
+            
+            # Unisci i componenti con underscore per ottenere il nome della tabella
+            dataplex_table_id = "_".join(dataplex_table_name_parts)
+            
+            # Sanitizzazione aggiuntiva per assicurarsi che sia un nome tabella BigQuery valido
+            dataplex_table_id = ''.join(c if c.isalnum() or c == '_' else '_' for c in dataplex_table_id)
+            if not dataplex_table_id[0].isalpha() and dataplex_table_id[0] != '_':
+                dataplex_table_id = 'tbl_' + dataplex_table_id
+            
+            # Il nome completo della tabella BigQuery che Dataplex creerà
+            expected_bq_table_ref = f"{project_id}.silver_zone.{dataplex_table_id}"
+            
+            # Debug log
+            print(f"Tabella BigQuery prevista che Dataplex creerà: {expected_bq_table_ref}")
+            print(f"   - Componenti del percorso: {path_suffix_components}")
+            print(f"   - Parti del nome tabella: {dataplex_table_name_parts}")
+            
+            # Risposta aggiornata con informazioni su Dataplex
+            response_data = {
+                "status": "success",
+                "message": f"Processed gs://{bronze_bucket_name}{blob_name_in_gcs} to Silver: {uri_parquet_in_silver}. Dataplex discovery triggered.",
+                "silver_path": f"gs://{SILVER_BUCKET_NAME}/{silver_parquet_full_gcs_path}",
+                "columns": processed_columns_with_types,
+                "record_count": len(df_data_only),
+                "silver_path_prefix_base": silver_data_files_base_path,
+                "bigquery_table": expected_bq_table_ref,  # Rinominato da expected_bigquery_table a bigquery_table
+                "dataplex_status": "success" if dataplex_success else "error",
+                "dataplex_info": dataplex_info,
+                "note": "BigQuery table will be created automatically by Dataplex discovery process"
+            }
+            return (response_data, 200, response_cors_headers)
+        
+        else:
+            # Gestione del caso in cui il DataFrame è None o vuoto
+            return ({"status": "error", "error": "Elaborazione del file non riuscita o ha prodotto un set di dati vuoto."}, 400, response_cors_headers)
 
     except Exception as e:
         error_msg = str(e)
