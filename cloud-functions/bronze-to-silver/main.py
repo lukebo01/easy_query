@@ -6,7 +6,7 @@ import pandas as pd
 from google.cloud import storage
 from google.cloud import dataplex_v1
 import functions_framework
-from flask import Request # Per il type hint di request
+from flask import Request, jsonify # Per il type hint di request
 import io # Per BytesIO
 import PyPDF2 # Per i PDF
 from PIL import Image # Per le immagini
@@ -14,6 +14,7 @@ import base64 # Per la codifica base64 delle immagini
 import traceback # Per un logging degli errori più dettagliato
 from typing import List, Dict, Any, Optional
 import time
+import uuid
 
 # --- CONFIGURAZIONE GLOBALE ---
 # Bucket GCS dove risiedono i dati Silver.
@@ -25,8 +26,6 @@ SILVER_DATA_FILES_ROOT_PREFIX = "silver_data_files"  # Es: gs://silver-layer-buc
 SILVER_MANIFESTS_ROOT_PREFIX = "silver_manifests" # Es: gs://silver-layer-bucket/silver_manifests/...
 
 # Configurazione Dataplex
-DATAPLEX_LAKE = "silver_lake"  # Nome del tuo Lake Dataplex
-DATAPLEX_ZONE = "silver_zone"  # Nome della tua Zone Dataplex
 DATAPLEX_LOCATION = "europe-central2"  # Regione Dataplex, es. "europe-central2"
 
 storage_client = storage.Client()
@@ -34,50 +33,66 @@ storage_client = storage.Client()
 dataplex_client = None
 
 # --- FUNZIONI PER DATAPLEX ---
-def _initialize_dataplex_client():
-    """Inizializza il client Dataplex"""
-    global dataplex_client
-    if dataplex_client is None:
-        dataplex_client = dataplex_v1.DataplexServiceClient()
-    return dataplex_client
 
-def trigger_dataplex_discovery(project_id: str, location: str, lake_name: str, zone_name: str):
-    """
-    Avvia una scansione Dataplex su una zona specifica
-    Parametri:
-    - project_id: ID progetto GCP
-    - location: Regione (es. "europe-central2")
-    - lake_name: Nome del lake Dataplex
-    - zone_name: Nome della zone Dataplex
-    """
-    client = _initialize_dataplex_client()
-    
-    # Formatta il nome completo della zona Dataplex
-    zone_name_formatted = f"projects/{project_id}/locations/{location}/lakes/{lake_name}/zones/{zone_name}"
-    
+def trigger_dataplex_discovery(project_id: str):
+    """Cloud Function HTTP trigger to create a Dataplex entity and launch a scan."""
     try:
-        print(f"Avvio scansione Dataplex per zona: {zone_name_formatted}")
+        region = "europe-central2"
+        lake = "easyquery-lake"
+        zone = "silver-zone"
         
-        # Crea la richiesta per avviare la discovery sulla zona
-        request = dataplex_v1.TriggerDiscoveryRequest(
-            name=zone_name_formatted
+        gcs_path = f"gs://{SILVER_BUCKET_NAME}/{SILVER_DATA_FILES_ROOT_PREFIX}/{zone}/"
+        
+        entity_id = gcs_path.rstrip('/').split('/')[-1].replace('=', '_').replace('-', '_')
+        entity_id = f"ent_{entity_id}_{uuid.uuid4().hex[:6]}"
+        parent_entity_path = f"projects/{project_id}/locations/{region}/lakes/{lake}/zones/{zone}"
+        entity_name_full = f"{parent_entity_path}/entities/{entity_id}"
+
+        # Create Dataplex Entity
+        metadata_client = dataplex_v1.MetadataServiceClient()
+        entity = dataplex_v1.Entity(
+            id=entity_id,
+            display_name=f"Entity for {entity_id}",
+            description="Entita generata via Cloud Function per Parquet",
+            data_path=gcs_path,
+            type_="FILESET",
+            format_=dataplex_v1.StorageFormat(
+                format_=dataplex_v1.StorageFormat.Format.PARQUET
+            ),
+            schema=dataplex_v1.Schema(user_managed=False)
         )
-        
-        # Avvia la scansione di discovery
-        operation = client.trigger_discovery(request=request)
-        
-        # Attendi il completamento dell'operazione (con timeout)
-        print("Scansione Dataplex avviata, attendere il completamento...")
-        result = operation.result(timeout=120)  # Timeout di 120 secondi
-        
-        print(f"Scansione Dataplex completata con successo: {result}")
-        return True, "Scansione Dataplex completata con successo"
-    
+
+        metadata_client.create_entity(parent=parent_entity_path, entity=entity)
+
+        # Launch Data Profile Scan
+        scan_client = dataplex_v1.DataScanServiceClient()
+        scan_id = f"scan_{entity_id}"
+        scan_parent = f"projects/{project_id}/locations/{region}"
+
+        data_scan = dataplex_v1.DataScan(
+            display_name=f"Scan for {entity_id}",
+            data=dataplex_v1.DataScan.Data(
+                entity=entity_name_full
+            ),
+            data_profile=dataplex_v1.DataProfileSpec()
+        )
+
+        operation = scan_client.create_data_scan(
+            parent=scan_parent,
+            data_scan_id=scan_id,
+            data_scan=data_scan
+        )
+
+        result = operation.result()
+
+        return jsonify({
+            "status": "success",
+            "entity_id": entity_id,
+            "scan_name": result.name
+        })
+
     except Exception as e:
-        error_msg = f"Errore durante l'avvio della scansione Dataplex: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
-        return False, error_msg
+        return jsonify({"error": str(e)}), 500
 
 # --- FUNZIONI HELPER ESISTENTI ---
 def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
@@ -118,13 +133,14 @@ def determine_silver_path_components(file_path_in_bronze: str, file_extension: s
         elif "text/plain" in ct_lower: content_context = "text_file"
         elif "excel" in ct_lower or "spreadsheetml" in ct_lower: content_context = "excel_spreadsheet"
 
-    date_partition_str = datetime.datetime.utcnow().strftime("%Y/%m/%d") # YYYY/MM/DD
+    # Formato data modificato per evitare il formato di partizionamento Hive "key=value"
+    date_partition_str = datetime.datetime.utcnow().strftime("date_%Y_%m_%d") # Formato non-Hive
 
     path_components = [
         data_domain,
         file_category,
         content_context,
-        f"date_partition={date_partition_str}" # Stile partizione Hive
+        date_partition_str
     ]
     return [part for part in path_components if part] # Rimuove eventuali None o stringhe vuote
 
@@ -502,12 +518,8 @@ def bronze_to_silver(request: Request):
             
             try:
                 # Avvia la scansione Dataplex per aggiornare automaticamente il catalogo
-                print(f"Avvio scansione Dataplex per zona {DATAPLEX_ZONE} in lake {DATAPLEX_LAKE}")
                 dataplex_success, dataplex_info = trigger_dataplex_discovery(
-                    project_id=project_id,
-                    location=DATAPLEX_LOCATION,
-                    lake_name=DATAPLEX_LAKE,
-                    zone_name=DATAPLEX_ZONE
+                    project_id=project_id
                 )
                 
                 if dataplex_success:
@@ -538,25 +550,14 @@ def bronze_to_silver(request: Request):
                 processed_columns_with_types.append({"name": col_name, "type": simple_type})
             
             # Calcola il nome della tabella BigQuery che Dataplex creerà, basato sul percorso delle cartelle
-            # Esempio: silver_data_files/it/document/text_file/date_partition=2025/05/13 → silver_data_files_it_document_text_file
+            # Modificato per non utilizzare più il formato di partizionamento Hive
             dataplex_table_name_parts = []
             
             # Aggiungi il prefisso root (silver_data_files)
             dataplex_table_name_parts.append(SILVER_DATA_FILES_ROOT_PREFIX)
             
-            # Trova l'indice dove inizia la partizione Hive
-            partition_index = -1
-            for i, component in enumerate(path_suffix_components):
-                if component.startswith("date_partition="):
-                    partition_index = i
-                    break
-            
-            # Aggiungi solo i componenti PRIMA della partizione Hive
-            if partition_index >= 0:
-                dataplex_table_name_parts.extend(path_suffix_components[:partition_index])
-            else:
-                # Se non c'è partizione, aggiungi tutti i componenti
-                dataplex_table_name_parts.extend(path_suffix_components)
+            # Aggiungi i componenti del percorso
+            dataplex_table_name_parts.extend(path_suffix_components)
             
             # Unisci i componenti con underscore per ottenere il nome della tabella
             dataplex_table_id = "_".join(dataplex_table_name_parts)
@@ -574,6 +575,12 @@ def bronze_to_silver(request: Request):
             print(f"   - Componenti del percorso: {path_suffix_components}")
             print(f"   - Parti del nome tabella: {dataplex_table_name_parts}")
             
+            # Aggiungiamo una colonna di data al DataFrame per poter filtrare in modo standard in BigQuery
+            if 'date_partition' not in df_data_only.columns:
+                # Aggiungi una colonna di data in formato stringa YYYY/MM/DD
+                current_date = datetime.datetime.utcnow().strftime("%Y/%m/%d")
+                df_data_only['date_partition'] = current_date
+
             # Risposta aggiornata con informazioni su Dataplex
             response_data = {
                 "status": "success",

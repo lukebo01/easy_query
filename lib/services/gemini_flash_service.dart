@@ -153,54 +153,25 @@ class GeminiFlashService {
             
             IMPORTANT INSTRUCTIONS FOR SQL GENERATION (MANDATORY FOR ALL QUERIES):
 
-            1. MANDATORY PARTITION FILTER:
-               IF you query any table that includes 'date_partition' in its schema 
-               (like `soy-transducer-456512-t0.silver_zone.silver_data_files_it_document_text_file` 
-               or any table in the `silver_zone` dataset that is Hive-partitioned by 'date_partition'),
-               YOU ABSOLUTELY MUST INCLUDE A WHERE CLAUSE THAT FILTERS THE 'date_partition' COLUMN.
+            1. NON-PARTITIONED DATA STRUCTURE:
+               All tables in the system are NOT Hive-partitioned. The date_partition column is a regular 
+               string column in the format 'YYYY/MM/DD', not a partition key.
                
-               If the user's question does not provide a specific date or date range, 
-               you MUST query a recent and relevant range (e.g., the last 30 days from the current date using 
-               `PARSE_DATE('%Y/%m/%d', date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()`).
+               When querying any table, especially those in 'silver_zone' dataset, avoid using any syntax
+               that would treat date_partition as a partition key.
                
-               Alternatively, if a specific relevant partition like '2025/05/12' is known or provided in context, use that: `date_partition = '2025/05/12'`.
-               DO NOT generate a query for these partitioned tables without an effective 'date_partition' filter.
+               ALWAYS treat date_partition as a regular string column that happens to contain date information.
 
-            2. DATE COMPARISON FOR 'date_partition' COLUMN (WHICH IS A STRING 'YYYY/MM/DD'):
-               When you filter 'date_partition' by comparing it to a DATE type value 
-               (e.g., from CURRENT_DATE(), DATE_SUB(), or a DATE literal like DATE('2023-01-01')),
-               YOU MUST EXPLICITLY CONVERT THE 'date_partition' STRING to a DATE type before the comparison.
+            2. DATE FILTERING BEST PRACTICES:
+               When filtering data by date, use TABLESAMPLE or limit your results if needed.
                
-               USE THE FUNCTION: PARSE_DATE('%Y/%m/%d', date_partition)
+               For date comparison with 'date_partition' column:
+               - Use PARSE_DATE('%Y/%m/%d', date_partition) to convert to DATE type
+               - Example: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
                
-               CORRECT EXAMPLE: WHERE PARSE_DATE('%Y/%m/%d', date_partition) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-               INCORRECT EXAMPLE (THIS WILL FAIL): WHERE date_partition >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-               
-               ALWAYS PERFORM THIS CONVERSION for date comparisons involving the 'date_partition' STRING column.
-               
-            3. MANDATORY PARTITION FILTERS IN JOINS:
-               When joining tables that are partitioned on 'date_partition', you MUST apply partition filters to EACH table 
-               in the query, not just the first table. Failing to do so will cause an error.
-               
-               CORRECT JOIN EXAMPLE:
-               ```
-               SELECT t1.col1, t2.col2 
-               FROM table1 AS t1 
-               JOIN table2 AS t2 ON t1.id = t2.id 
-               WHERE PARSE_DATE('%Y/%m/%d', t1.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
-                 AND PARSE_DATE('%Y/%m/%d', t2.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
-               ```
-               
-               INCORRECT JOIN EXAMPLE:
-               ```
-               SELECT t1.col1, t2.col2 
-               FROM table1 AS t1 
-               JOIN table2 AS t2 ON t1.id = t2.id 
-               WHERE PARSE_DATE('%Y/%m/%d', t1.date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()
-               ```
-               
-               The incorrect example will fail because table2's date_partition is not filtered.
-
+               If a specific date range isn't provided in the user question, use a reasonable default like:
+               "WHERE PARSE_DATE('%Y/%m/%d', date_partition) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE()"
+              
             Generate a single SQL query that answers the user's question.
             Ensure that your query:
             1. Uses standard BigQuery SQL syntax
@@ -212,8 +183,7 @@ class GeminiFlashService {
             7. Sorts results in a logical order
             8. Limits the result set if appropriate
             9. Uses appropriate functions for text manipulation, date handling, etc.
-            10. Applies partition filters to EVERY table in the query that has a date_partition column
-            11. Does not include any comments or explanations in the SQL itself
+            10. Does not include any comments or explanations in the SQL itself
             
             Return only the SQL query without any additional text or explanations.
               ''',

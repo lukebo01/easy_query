@@ -183,22 +183,18 @@ class _SearchPageState extends State<SearchPage> {
             final Map<String, dynamic> schemaMap = jsonDecode(schemaJson);
             schemas.add(schemaMap); // schemaMap è già un Map<String, dynamic>
             tableNames.add(fullTableName);
-            // log.log('Schema for table $fullTableName: ${jsonEncode(schemaMap)}'); // Può essere molto verboso
 
-            // --- MODIFICA PER DATI CAMPIONE CON FILTRO PARTIZIONE ---
+            // MODIFICA: Usa TABLESAMPLE invece di filtri di partizione per tutte le tabelle
+            // per evitare completamente problemi con partizioni Hive
             String sampleQuery;
-            // Identifica se è una tabella partizionata che necessita di filtro
-            // (questo controllo è un esempio, rendilo più specifico per i tuoi nomi di tabelle partizionate)
-            bool isPartitionedTableRequiringFilter = 
-                (targetDataset == 'silver_zone' && schemaMap['fields'] != null &&
-                 (schemaMap['fields'] as List).any((field) => field['name'] == 'date_partition'));
-
-            if (isPartitionedTableRequiringFilter) {
-                String partitionToSample = await _getLatestAvailablePartition(targetDataset, tableIdInDataset, cloudFilesMetadata);
-                sampleQuery = "SELECT * FROM `$fullTableName` WHERE date_partition = '$partitionToSample' LIMIT 15"; // Modificato
-                log("Using partition filter for sample query on $fullTableName: WHERE date_partition = '$partitionToSample'");
+            
+            if (targetDataset == 'silver_zone') {
+              // Per tabelle silver_zone, usa LIMIT senza filtri di partizione
+              sampleQuery = "SELECT * FROM `$fullTableName` LIMIT 15";
+              log("Using simple LIMIT query for silver_zone table $fullTableName to avoid partition issues");
             } else {
-                sampleQuery = "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15"; // Lascia TABLESAMPLE qui se la tabella non è partizionata o il filtro non è richiesto
+              // Per altre tabelle usa TABLESAMPLE
+              sampleQuery = "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
             }
             
             try {
@@ -206,7 +202,22 @@ class _SearchPageState extends State<SearchPage> {
               sampleData[fullTableName] = tableSample;
             } catch (e) {
               log('Warning: Failed to get sample data from $fullTableName (Query: $sampleQuery). Error: $e');
-              sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
+              
+              // Se fallisce con la query principale, prova un fallback con solo LIMIT
+              if (targetDataset == 'silver_zone') {
+                try {
+                  final fallbackQuery = "SELECT * FROM `$fullTableName` LIMIT 5";
+                  log("Trying fallback query for $fullTableName: $fallbackQuery");
+                  final fallbackSample = await widget.bigQueryService.executeQuery(fallbackQuery);
+                  sampleData[fullTableName] = fallbackSample;
+                  log("Fallback query successful for $fullTableName");
+                } catch (fallbackError) {
+                  log('Failed fallback query for $fullTableName: $fallbackError');
+                  sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
+                }
+              } else {
+                sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
+              }
             }
           } catch (e) {
             log('Warning: Failed to get schema for table $fullTableName. Skipping. Error: $e');
@@ -234,7 +245,7 @@ class _SearchPageState extends State<SearchPage> {
       
       final contextAnalysis = orchestrationResult['contextAnalysis'];
       // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
-      final List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
+      List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
           ?.map((item) => item as Map<String, dynamic>)
           ?.toList() ?? [];
       final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
@@ -242,16 +253,21 @@ class _SearchPageState extends State<SearchPage> {
           ?.toList() ?? [];
       
       if (mounted) {
+        setState(() { _currentExecutingQuery = 'Refreshing schemas...'; });
+      }
+      
+      // NUOVA PARTE: Aggiorna tutti gli schemi delle tabelle in silver_zone
+      updatedSchemas = await _refreshSilverZoneSchemas(updatedTableNames, updatedSchemas);
+      
+      if (mounted) {
         setState(() { _currentExecutingQuery = 'Building optimized query...'; });
       }
 
-      // Passa i dati campione aggiornati (se l'orchestrazione li modifica, anche se non sembra farlo)
-      // e il contextAnalysis aggiornato (se l'orchestrazione lo modifica)
       final sqlQuery = await widget.geminiService.generateSqlQuery(
         question,
         jsonEncode(updatedSchemas), 
         jsonEncode(updatedTableNames), 
-        sampleData: sampleData, // Potresti passare sampleData aggiornato se l'orchestrazione lo fa
+        sampleData: sampleData,
         contextAnalysis: contextAnalysis,
       );
 
@@ -294,6 +310,78 @@ class _SearchPageState extends State<SearchPage> {
           _currentExecutingQuery = null;
         });
       }
+    }
+  }
+
+  /// Aggiorna gli schemi di tutte le tabelle nel dataset silver_zone
+  Future<List<Map<String, dynamic>>> _refreshSilverZoneSchemas(
+      List<String> tableNames, 
+      List<Map<String, dynamic>> currentSchemas) async {
+    final List<Map<String, dynamic>> refreshedSchemas = List.from(currentSchemas);
+    final String projectId = widget.bigQueryService.projectId;
+    const String silverZoneDataset = 'silver_zone';
+    
+    try {
+      // Ottieni l'elenco completo delle tabelle in silver_zone
+      final silverZoneTables = await widget.bigQueryService.getTables(silverZoneDataset);
+      log('Retrieved ${silverZoneTables.length} tables from silver_zone dataset');
+      
+      // Per ogni tabella in silverZoneTables
+      for (var tableId in silverZoneTables) {
+        final fullTableName = '$projectId.$silverZoneDataset.$tableId';
+        
+        // Se la tabella è tra quelle che ci interessano
+        if (tableNames.contains(fullTableName)) {
+          try {
+            log('Refreshing schema for: $fullTableName');
+            final schemaJson = await widget.bigQueryService.getTableSchema(silverZoneDataset, tableId);
+            final Map<String, dynamic> updatedSchema = jsonDecode(schemaJson);
+            
+            // NUOVA PARTE: Controlla se esiste un campo date_partition nello schema e impostalo
+            // esplicitamente come STRING non-Hive (per evitare che BigQuery lo interpreti come partizione)
+            if (updatedSchema.containsKey('schema') && 
+                updatedSchema['schema'].containsKey('fields')) {
+              List<dynamic> fields = updatedSchema['schema']['fields'];
+              bool hasDatePartition = fields.any((field) => 
+                  field is Map<String, dynamic> && 
+                  field.containsKey('name') && 
+                  field['name'] == 'date_partition');
+              
+              if (hasDatePartition) {
+                log('Found date_partition field in schema for $fullTableName, ensuring it\'s properly typed as STRING');
+                // Potremmo ulteriormente modificare i metadati dello schema qui per assicurarci
+                // che BigQuery non lo interpreti come partizione...
+              }
+            }
+            
+            // Trova l'indice dello schema corrente per questa tabella (se esiste)
+            final existingIndex = refreshedSchemas.indexWhere((schema) {
+              final tableRef = schema['tableReference'];
+              return tableRef != null && 
+                     tableRef['projectId'] == projectId &&
+                     tableRef['datasetId'] == silverZoneDataset &&
+                     tableRef['tableId'] == tableId;
+            });
+            
+            if (existingIndex >= 0) {
+              // Sostituisci lo schema esistente
+              refreshedSchemas[existingIndex] = updatedSchema;
+              log('Updated existing schema for $fullTableName');
+            } else {
+              // Aggiungi il nuovo schema
+              refreshedSchemas.add(updatedSchema);
+              log('Added new schema for $fullTableName');
+            }
+          } catch (e) {
+            log('Warning: Failed to refresh schema for $fullTableName: $e');
+          }
+        }
+      }
+      
+      return refreshedSchemas;
+    } catch (e) {
+      log('Error refreshing silver_zone schemas: $e');
+      return currentSchemas; // Ritorna gli schemi originali in caso di errore
     }
   }
 
