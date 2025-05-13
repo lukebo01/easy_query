@@ -380,8 +380,8 @@ class BigQueryService {
    Future<Map<String, dynamic>> createOrUpdateExternalTable(
      String datasetId,
      String tableId,
-     String gcsParquetUri, 
-     List<Map<String, String>> schemaFieldsFromCF,
+     String gcsParquetUri,
+     List<Map<String, String>> schemaFieldsFromCF, // Ora riceve Map<String, String> con type già BQ
   ) async {
     if (!_isInitialized) {
       throw Exception('BigQuery service not initialized. Call initialize() first.');
@@ -391,16 +391,17 @@ class BigQueryService {
     log('Attempting to create/update external table: $fullTableIdForLog using GCS URI: $gcsParquetUri for data structure.');
 
     // 1. Prepara lo schema di BigQuery per le colonne di DATI
+    //    schemaFieldsFromCF ora contiene i tipi BQ corretti come stringhe.
     final List<TableFieldSchema> bqDataSchemaFields = schemaFieldsFromCF.map((field) {
       return TableFieldSchema()
         ..name = field['name']
-        ..type = field['type'] ?? 'STRING' 
+        ..type = field['type'] // field['type'] è già il tipo BQ corretto (es. "BOOLEAN", "STRING")
         ..mode = field['mode'] ?? 'NULLABLE';
     }).toList();
 
     if (bqDataSchemaFields.isEmpty) {
       final errorMsg = 'Schema fields list (for data columns) is empty for $fullTableIdForLog. Cannot create table without schema.';
-      log(errorMsg, error: errorMsg, level: 1000);
+      log(errorMsg, error: errorMsg, level: 1000); // Use log se importato da developer
       throw Exception(errorMsg);
     }
     final schemaForDataColumnsOnly = TableSchema()..fields = bqDataSchemaFields;
@@ -408,8 +409,8 @@ class BigQueryService {
     // 2. Prepara la configurazione per la tabella esterna
     final externalDataConfig = ExternalDataConfiguration()
       ..sourceFormat = 'PARQUET'
-      ..autodetect = false 
-      ..schema = schemaForDataColumnsOnly;
+      ..autodetect = false // Importante: usiamo lo schema fornito
+      ..schema = schemaForDataColumnsOnly; // Applica lo schema definito
 
     // Estrai il nome del bucket e il path relativo
     String pathWithoutGs = gcsParquetUri.startsWith('gs://') ? gcsParquetUri.substring(5) : gcsParquetUri;
@@ -419,43 +420,39 @@ class BigQueryService {
       log(errorMsg, error: errorMsg, level: 1000);
       throw Exception(errorMsg);
     }
+    // ignore: unused_local_variable
     String bucketNameFromUri = pathWithoutGs.substring(0, firstSlashAfterBucketIdx);
     String objectPathRelativeToBucket = pathWithoutGs.substring(firstSlashAfterBucketIdx + 1);
 
-    // Logica Hive partition vs Single file
     final RegExp hivePartitionKeyPattern = RegExp(r'([a-zA-Z0-9_]+)=([^/]+)');
     Match? firstHivePartitionMatch = hivePartitionKeyPattern.firstMatch(objectPathRelativeToBucket);
-    
-    // Determina se è un singolo file Parquet (controlla se termina con .parquet)
+
     bool isSingleParquetFile = gcsParquetUri.toLowerCase().endsWith('.parquet');
-    
+
     if (isSingleParquetFile) {
-      // È un singolo file Parquet - configura una tabella esterna semplice che punta SOLO a questo file
       log('Configuring as SINGLE FILE external table for $fullTableIdForLog. Using direct file reference.');
-      externalDataConfig.sourceUris = [gcsParquetUri]; // Usa direttamente l'URI completo del file
+      externalDataConfig.sourceUris = [gcsParquetUri];
     } else if (firstHivePartitionMatch != null) {
-      // È una struttura partizionata Hive - configura come tabella partizionata
       int startOfFirstHiveKey = firstHivePartitionMatch.start;
       String basePathBeforeHivePartitions = objectPathRelativeToBucket.substring(0, startOfFirstHiveKey);
-      
+
       String calculatedHiveSourceUriPrefix = 'gs://$bucketNameFromUri/$basePathBeforeHivePartitions';
       if (!calculatedHiveSourceUriPrefix.endsWith('/')) {
         calculatedHiveSourceUriPrefix += '/';
       }
-      
-      // Per strutture Hive partizionate, usa il pattern corretto per sourceUris
-      // Questo pattern deve raggiungere tutti i file Parquet in tutte le partizioni
-      externalDataConfig.sourceUris = ['${calculatedHiveSourceUriPrefix}*/*.parquet']; // Pattern ricorsivo per individuare tutti i file Parquet
+
+      externalDataConfig.sourceUris = ['${calculatedHiveSourceUriPrefix}*/*.parquet']; // Pattern per file parquet in sottocartelle
+       // La CF Python dovrebbe aver già creato le partizioni Hive automaticamente se il file Parquet è in una struttura Hive.
+       // BigQuery può inferire partizioni Hive se `sourceUriPrefix` è impostato correttamente e i file Parquet sono nella struttura corretta.
       externalDataConfig.hivePartitioningOptions = HivePartitioningOptions()
-        ..mode = 'AUTO' 
-        ..sourceUriPrefix = calculatedHiveSourceUriPrefix; 
+        ..mode = 'AUTO' // AUTO rileva lo schema di partizionamento dai path
+        ..sourceUriPrefix = calculatedHiveSourceUriPrefix;
 
       log('Configuring AS HIVE PARTITIONED external table for $fullTableIdForLog.');
       log('  Hive Source URI Prefix: $calculatedHiveSourceUriPrefix');
       log('  Source URIs pattern: ${externalDataConfig.sourceUris}');
       log('  Data Schema (non-partition columns) provided with ${bqDataSchemaFields.length} fields.');
     } else {
-      // È una directory non partizionata con file Parquet - usa pattern con wildcard
       String gcsFolderContainingFile = gcsParquetUri;
       if (!gcsFolderContainingFile.endsWith('/')) {
         gcsFolderContainingFile += '/';
@@ -464,16 +461,14 @@ class BigQueryService {
       log('Configuring as NON-HIVE-PARTITIONED DIRECTORY external table for $fullTableIdForLog. Source URIs pattern: ${externalDataConfig.sourceUris}');
     }
 
-    // 3. Definisci la risorsa Tabella
     final tableResource = Table()
       ..tableReference = (TableReference()
         ..projectId = projectId
         ..datasetId = datasetId
         ..tableId = tableId)
       ..externalDataConfiguration = externalDataConfig
-      ..location = 'europe-central2'; // Aggiorna con la tua location BigQuery se diversa
+      ..location = 'europe-central2';
 
-    // 4. Controlla se la tabella esiste già per decidere se creare o sostituire
     bool tableCurrentlyExists = false;
     try {
       await _bigQueryApi.tables.get(projectId, datasetId, tableId);
@@ -483,7 +478,6 @@ class BigQueryService {
       log('External table $fullTableIdForLog does not exist. Will create it.');
     }
 
-    // 5. Crea o Sostituisci (Delete + Insert) la tabella
     Table bqApiResultTable;
     try {
       if (tableCurrentlyExists) {
@@ -492,7 +486,7 @@ class BigQueryService {
       }
       bqApiResultTable = await _bigQueryApi.tables.insert(tableResource, projectId, datasetId);
       log('Successfully ${tableCurrentlyExists ? "re-created" : "created"} external table: $fullTableIdForLog');
-      
+
       return {
         'status': 'success',
         'message': 'External table ${tableCurrentlyExists ? "re-created" : "created"} successfully.',
