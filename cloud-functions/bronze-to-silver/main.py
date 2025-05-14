@@ -35,64 +35,166 @@ dataplex_client = None
 # --- FUNZIONI PER DATAPLEX ---
 
 def trigger_dataplex_discovery(project_id: str):
-    """Cloud Function HTTP trigger to create a Dataplex entity and launch a scan."""
+    """
+    Cloud Function HTTP trigger to create a Dataplex entity and launch a scan.
+    Restituisce una tupla (success: bool, message: str) per indicare il risultato dell'operazione.
+    """
+    print(f"[DATAPLEX DEBUG] ========== INIZIO DATAPLEX DISCOVERY ==========")
+    print(f"[DATAPLEX DEBUG] Inizializzazione discovery Dataplex per project_id: {project_id}")
+    
     try:
         region = "europe-central2"
         lake = "easyquery-lake"
         zone = "silver-zone"
         
-        gcs_path = f"gs://{SILVER_BUCKET_NAME}/{SILVER_DATA_FILES_ROOT_PREFIX}/{zone}/"
+        print(f"[DATAPLEX DEBUG] Configurazione: region={region}, lake={lake}, zone={zone}")
         
+        gcs_path = f"gs://{SILVER_BUCKET_NAME}/{SILVER_DATA_FILES_ROOT_PREFIX}/"
+        print(f"[DATAPLEX DEBUG] Path GCS per Dataplex entity: {gcs_path}")
+        
+        # Genera un ID univoco per l'entità
         entity_id = gcs_path.rstrip('/').split('/')[-1].replace('=', '_').replace('-', '_')
         entity_id = f"ent_{entity_id}_{uuid.uuid4().hex[:6]}"
+        print(f"[DATAPLEX DEBUG] Entity ID generato: {entity_id}")
+        
+        # Crea percorsi completi per parent e entity
         parent_entity_path = f"projects/{project_id}/locations/{region}/lakes/{lake}/zones/{zone}"
         entity_name_full = f"{parent_entity_path}/entities/{entity_id}"
-
-        # Create Dataplex Entity
-        metadata_client = dataplex_v1.MetadataServiceClient()
-        entity = dataplex_v1.Entity(
-            id=entity_id,
-            display_name=f"Entity for {entity_id}",
-            description="Entita generata via Cloud Function per Parquet",
-            data_path=gcs_path,
-            type_="FILESET",
-            format_=dataplex_v1.StorageFormat(
-                format_=dataplex_v1.StorageFormat.Format.PARQUET
-            ),
-            schema=dataplex_v1.Schema(user_managed=False)
-        )
-
-        metadata_client.create_entity(parent=parent_entity_path, entity=entity)
-
-        # Launch Data Profile Scan
-        scan_client = dataplex_v1.DataScanServiceClient()
+        
+        print(f"[DATAPLEX DEBUG] Parent entity path: {parent_entity_path}")
+        print(f"[DATAPLEX DEBUG] Entity name full: {entity_name_full}")
+        
+        # Inizializzazione client Dataplex
+        print("[DATAPLEX DEBUG] Tentativo di inizializzazione MetadataServiceClient...")
+        try:
+            metadata_client = dataplex_v1.MetadataServiceClient()
+            print("[DATAPLEX DEBUG] MetadataServiceClient inizializzato con successo")
+        except Exception as client_error:
+            error_msg = f"Errore creazione client: {str(client_error)}"
+            print(f"[DATAPLEX ERROR] {error_msg}")
+            traceback.print_exc()
+            return False, error_msg
+        
+        # Creazione dell'oggetto Entity
+        print("[DATAPLEX DEBUG] Tentativo di creazione oggetto Entity...")
+        try:
+            # Utilizza l'asset predefinito esistente nella zona Dataplex
+            asset_id = "silver-layer"  # Asset predefinito che sappiamo esistere
+            print(f"[DATAPLEX DEBUG] Utilizzo asset predefinito: {asset_id}")
+            
+            entity = dataplex_v1.Entity(
+                id=entity_id,
+                display_name=f"Entity for {entity_id}",
+                description="Entita generata via Cloud Function per Parquet",
+                data_path=gcs_path,
+                type_="FILESET",
+                format_=dataplex_v1.StorageFormat(
+                    format_=dataplex_v1.StorageFormat.Format.PARQUET,
+                    mime_type="application/vnd.apache.parquet"
+                ),
+                schema=dataplex_v1.Schema(user_managed=False),
+                system="CLOUD_STORAGE",
+                # Utilizziamo l'asset predefinito anziché generarne uno casualmente
+                asset=asset_id,
+                data_path_pattern=f"{gcs_path}**.parquet"
+            )
+            print(f"[DATAPLEX DEBUG] Oggetto Entity creato con asset predefinito: {entity}")
+        except Exception as entity_creation_error:
+            error_msg = f"Errore creazione entity object: {str(entity_creation_error)}"
+            print(f"[DATAPLEX ERROR] {error_msg}")
+            traceback.print_exc()
+            return False, error_msg
+        
+        # Chiamata all'API per creare l'entità
+        print(f"[DATAPLEX DEBUG] Tentativo di invocazione create_entity API con parent={parent_entity_path}...")
+        try:
+            print(f"[DATAPLEX DEBUG] Parametri completi create_entity: parent={parent_entity_path}, entity={entity}")
+            create_entity_response = metadata_client.create_entity(parent=parent_entity_path, entity=entity)
+            print(f"[DATAPLEX DEBUG] Entity creata con successo. Response: {create_entity_response}")
+        except Exception as create_entity_error:
+            error_detail = str(create_entity_error)
+            print(f"[DATAPLEX ERROR] Errore durante create_entity: {error_detail}")
+            traceback.print_exc()
+            return False, f"Errore durante create_entity: {error_detail}"
+        
+        # Inizializzazione client per la scansione
+        print("[DATAPLEX DEBUG] Tentativo di inizializzazione DataScanServiceClient...")
+        try:
+            scan_client = dataplex_v1.DataScanServiceClient()
+            print("[DATAPLEX DEBUG] DataScanServiceClient inizializzato con successo")
+        except Exception as scan_client_error:
+            error_msg = f"Errore creazione scan client: {str(scan_client_error)}"
+            print(f"[DATAPLEX ERROR] {error_msg}")
+            traceback.print_exc()
+            return False, error_msg
+        
+        # Preparazione della scansione
         scan_id = f"scan_{entity_id}"
         scan_parent = f"projects/{project_id}/locations/{region}"
-
-        data_scan = dataplex_v1.DataScan(
-            display_name=f"Scan for {entity_id}",
-            data=dataplex_v1.DataScan.Data(
-                entity=entity_name_full
-            ),
-            data_profile=dataplex_v1.DataProfileSpec()
-        )
-
-        operation = scan_client.create_data_scan(
-            parent=scan_parent,
-            data_scan_id=scan_id,
-            data_scan=data_scan
-        )
-
-        result = operation.result()
-
-        return jsonify({
-            "status": "success",
-            "entity_id": entity_id,
-            "scan_name": result.name
-        })
+        
+        print(f"[DATAPLEX DEBUG] Scan ID: {scan_id}")
+        print(f"[DATAPLEX DEBUG] Scan parent: {scan_parent}")
+        
+        print("[DATAPLEX DEBUG] Tentativo di creazione oggetto DataScan...")
+        try:
+            data_scan = dataplex_v1.DataScan(
+                display_name=f"Scan for {entity_id}",
+                data=dataplex_v1.DataScan.Data(
+                    entity=entity_name_full
+                ),
+                data_profile=dataplex_v1.DataProfileSpec()
+            )
+            print(f"[DATAPLEX DEBUG] Oggetto DataScan creato: {data_scan}")
+        except Exception as scan_creation_error:
+            error_msg = f"Errore creazione oggetto DataScan: {str(scan_creation_error)}"
+            print(f"[DATAPLEX ERROR] {error_msg}")
+            traceback.print_exc()
+            return False, error_msg
+        
+        # Chiamata all'API per creare la scansione
+        print(f"[DATAPLEX DEBUG] Tentativo di invocazione create_data_scan API con parent={scan_parent}, data_scan_id={scan_id}...")
+        try:
+            print(f"[DATAPLEX DEBUG] Parametri completi create_data_scan: parent={scan_parent}, data_scan_id={scan_id}, data_scan={data_scan}")
+            operation = scan_client.create_data_scan(
+                parent=scan_parent,
+                data_scan_id=scan_id,
+                data_scan=data_scan
+            )
+            print(f"[DATAPLEX DEBUG] Operation avviata: {operation.name}")
+            
+            # Attendiamo il completamento dell'operazione ma con un timeout per sicurezza
+            print("[DATAPLEX DEBUG] Inizio attesa risultato operazione (potrebbe richiedere tempo)...")
+            timeout_seconds = 30  # Imposta un timeout ragionevole
+            try:
+                start_time = time.time()
+                result = operation.result(timeout=timeout_seconds)
+                elapsed_time = time.time() - start_time
+                print(f"[DATAPLEX DEBUG] Operazione completata in {elapsed_time:.2f} secondi. Risultato: {result}")
+                
+                success_message = f"Dataplex entity e scan creati con successo. Entity ID: {entity_id}, Scan ID: {scan_id}, Operation: {operation.name}"
+                print(f"[DATAPLEX SUCCESS] {success_message}")
+                print(f"[DATAPLEX DEBUG] ========== FINE DATAPLEX DISCOVERY (SUCCESSO) ==========")
+                return True, success_message
+            except Exception as timeout_error:
+                # Se l'operazione va in timeout, consideriamo comunque il trigger come avvenuto
+                # perché l'operazione potrebbe completarsi in background
+                timeout_msg = f"Operazione avviata ma non completata entro {timeout_seconds} secondi: {str(timeout_error)}"
+                print(f"[DATAPLEX WARNING] {timeout_msg}")
+                print(f"[DATAPLEX DEBUG] ========== FINE DATAPLEX DISCOVERY (TIMEOUT MA AVVIATA) ==========")
+                return True, f"Dataplex scan avviata ma non ancora completata. Entity ID: {entity_id}, Scan ID: {scan_id}"
+        except Exception as create_scan_error:
+            error_detail = str(create_scan_error)
+            print(f"[DATAPLEX ERROR] Errore durante create_data_scan: {error_detail}")
+            traceback.print_exc()
+            print(f"[DATAPLEX DEBUG] ========== FINE DATAPLEX DISCOVERY (ERRORE) ==========")
+            return False, f"Errore durante create_data_scan: {error_detail}"
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_detail = str(e)
+        print(f"[DATAPLEX ERROR] Errore generico durante trigger_dataplex_discovery: {error_detail}")
+        traceback.print_exc()
+        print(f"[DATAPLEX DEBUG] ========== FINE DATAPLEX DISCOVERY (ERRORE GENERICO) ==========")
+        return False, f"Errore generico durante trigger_dataplex_discovery: {error_detail}"
 
 # --- FUNZIONI HELPER ESISTENTI ---
 def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
@@ -365,7 +467,7 @@ def _handle_mixed_type_columns(df_data_only, original_df):
     """
     Gestisce le colonne con potenziali tipi di dati misti.
     """
-    # Elenco delle colonne che potrebbero contenere tipi misti
+    # Elenco delle colonne che potrebbero contenere tipi di dati misti
     potential_mixed_type_columns = [
         "year_founded", "established_date", "registration_id", "reference_code"
     ]
