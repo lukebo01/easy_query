@@ -181,7 +181,7 @@ class GeminiFlashService {
             5. Handles any aggregations or grouping required
             6. Uses appropriate column aliases for readability
             7. Sorts results in a logical order
-            8. Limits the result set if appropriate
+            8. Limits the result with LIMIT 50 !
             9. Uses appropriate functions for text manipulation, date handling, etc.
             10. Does not include any comments or explanations in the SQL itself
             
