@@ -55,7 +55,7 @@ class GeminiFlashService {
             {
               'text': 
               """
-              Analizza la seguente domanda:
+              Analize this question:
               
               $userQuestion
               

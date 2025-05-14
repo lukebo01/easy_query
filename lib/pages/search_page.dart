@@ -172,7 +172,6 @@ class _SearchPageState extends State<SearchPage> {
       cloudFilesMetadata = await widget.bigQueryService.getBronzeMetadata();
       log('Cloud files metadata (bronze): ${jsonEncode(cloudFilesMetadata)}');
 
-
       for (var entry in datasetTablesMap.entries) {
         final targetDataset = entry.key;
         final tablesInDataset = entry.value;
@@ -227,9 +226,6 @@ class _SearchPageState extends State<SearchPage> {
       log('Table schemas fetched: ${schemas.length}');
       log('Sample data fetched for ${sampleData.keys.length} tables');
       
-      if (mounted) {
-        setState(() { _currentExecutingQuery = 'Orchestrating data transformations...'; });
-      }
       
       final dataOrchestrationService = DataOrchestrationService(
         geminiService: widget.geminiService,
@@ -238,6 +234,10 @@ class _SearchPageState extends State<SearchPage> {
         bronzeToSilverUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/bronze-to-silver',
         silverToGoldUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
       );
+
+      if (mounted) {
+        setState(() { _currentExecutingQuery = 'Starting Data Trasformation pipeline...'; });
+      }
       
       final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
         question, schemas, tableNames, sampleData, cloudFilesMetadata,
@@ -252,12 +252,6 @@ class _SearchPageState extends State<SearchPage> {
           ?.map((item) => item.toString())
           ?.toList() ?? [];
       
-      if (mounted) {
-        setState(() { _currentExecutingQuery = 'Refreshing schemas...'; });
-      }
-      
-      // NUOVA PARTE: Aggiorna tutti gli schemi delle tabelle in silver_zone
-      updatedSchemas = await _refreshSilverZoneSchemas(updatedTableNames, updatedSchemas);
       
       if (mounted) {
         setState(() { _currentExecutingQuery = 'Building optimized query...'; });
@@ -313,77 +307,6 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
-  /// Aggiorna gli schemi di tutte le tabelle nel dataset silver_zone
-  Future<List<Map<String, dynamic>>> _refreshSilverZoneSchemas(
-      List<String> tableNames, 
-      List<Map<String, dynamic>> currentSchemas) async {
-    final List<Map<String, dynamic>> refreshedSchemas = List.from(currentSchemas);
-    final String projectId = widget.bigQueryService.projectId;
-    const String silverZoneDataset = 'silver_zone';
-    
-    try {
-      // Ottieni l'elenco completo delle tabelle in silver_zone
-      final silverZoneTables = await widget.bigQueryService.getTables(silverZoneDataset);
-      log('Retrieved ${silverZoneTables.length} tables from silver_zone dataset');
-      
-      // Per ogni tabella in silverZoneTables
-      for (var tableId in silverZoneTables) {
-        final fullTableName = '$projectId.$silverZoneDataset.$tableId';
-        
-        // Se la tabella è tra quelle che ci interessano
-        if (tableNames.contains(fullTableName)) {
-          try {
-            log('Refreshing schema for: $fullTableName');
-            final schemaJson = await widget.bigQueryService.getTableSchema(silverZoneDataset, tableId);
-            final Map<String, dynamic> updatedSchema = jsonDecode(schemaJson);
-            
-            // NUOVA PARTE: Controlla se esiste un campo date_partition nello schema e impostalo
-            // esplicitamente come STRING non-Hive (per evitare che BigQuery lo interpreti come partizione)
-            if (updatedSchema.containsKey('schema') && 
-                updatedSchema['schema'].containsKey('fields')) {
-              List<dynamic> fields = updatedSchema['schema']['fields'];
-              bool hasDatePartition = fields.any((field) => 
-                  field is Map<String, dynamic> && 
-                  field.containsKey('name') && 
-                  field['name'] == 'date_partition');
-              
-              if (hasDatePartition) {
-                log('Found date_partition field in schema for $fullTableName, ensuring it\'s properly typed as STRING');
-                // Potremmo ulteriormente modificare i metadati dello schema qui per assicurarci
-                // che BigQuery non lo interpreti come partizione...
-              }
-            }
-            
-            // Trova l'indice dello schema corrente per questa tabella (se esiste)
-            final existingIndex = refreshedSchemas.indexWhere((schema) {
-              final tableRef = schema['tableReference'];
-              return tableRef != null && 
-                     tableRef['projectId'] == projectId &&
-                     tableRef['datasetId'] == silverZoneDataset &&
-                     tableRef['tableId'] == tableId;
-            });
-            
-            if (existingIndex >= 0) {
-              // Sostituisci lo schema esistente
-              refreshedSchemas[existingIndex] = updatedSchema;
-              log('Updated existing schema for $fullTableName');
-            } else {
-              // Aggiungi il nuovo schema
-              refreshedSchemas.add(updatedSchema);
-              log('Added new schema for $fullTableName');
-            }
-          } catch (e) {
-            log('Warning: Failed to refresh schema for $fullTableName: $e');
-          }
-        }
-      }
-      
-      return refreshedSchemas;
-    } catch (e) {
-      log('Error refreshing silver_zone schemas: $e');
-      return currentSchemas; // Ritorna gli schemi originali in caso di errore
-    }
-  }
 
   // --- Intelligent File Upload Methods ---
 

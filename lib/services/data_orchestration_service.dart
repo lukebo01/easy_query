@@ -164,6 +164,7 @@ class DataOrchestrationService {
         dev.log("No Bronze files suggested for transformation by Gemini.");
       }
 
+      /*
       // 3. Analizza se è necessaria un'ottimizzazione Silver → Gold (opzionale)
       if (transformedSilverFileUris.isNotEmpty) {
         dev.log("Analyzing if Gold optimization is needed for Silver files/tables: $transformedSilverFileUris");
@@ -243,7 +244,7 @@ class DataOrchestrationService {
         } else {
           dev.log("No Gold optimization needed or suggested for this query.");
         }
-      }
+      }*/
 
       dev.log("Data orchestration complete. Returning updated context.");
       dev.log("Final Schemas Count: ${finalSchemas.length}");
