@@ -6,7 +6,7 @@ import pandas as pd
 from google.cloud import storage
 from google.cloud import dataplex_v1
 import functions_framework
-from flask import Request, jsonify # Per il type hint di request
+from flask import Request, jsonify # Per il type hint di request,
 import io # Per BytesIO
 import PyPDF2 # Per i PDF
 from PIL import Image # Per le immagini
@@ -177,7 +177,7 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
                     description=f"Dati da {entity_directory_gcs_path} (autogen.)",
                     data_path=entity_directory_gcs_path,
                     type_=dataplex_v1.Entity.Type.FILESET,
-                    asset=asset_full_name, # Questo richiede che l'asset 'silver-layer' esista!
+                    asset=asset_id,
                     system=system_value,
                     format_=dataplex_v1.StorageFormat(
                         format_=dataplex_v1.StorageFormat.Format.PARQUET,
@@ -218,7 +218,10 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         scan_client = dataplex_v1.DataScanServiceClient()
         print("[DATAPLEX DEBUG] DataScanServiceClient inizializzato.")
 
-        scan_id = f"scan-{entity_id[:25]}-{uuid.uuid4().hex[:12]}" # ID univoco per la scansione
+        entity_id_part_for_scan = entity_id[:25].replace('_', '-') # Sostituisci gli underscore con trattini
+        scan_id = f"scan-{entity_id_part_for_scan}-{uuid.uuid4().hex[:12]}" # ID univoco per la scansione
+
+        print(f"[DATAPLEX DEBUG] Scan ID: {scan_id}")
         scan_parent_path = f"projects/{project_id}/locations/{region}"
 
         print(f"[DATAPLEX DEBUG] Scan ID: {scan_id}")
@@ -228,8 +231,10 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         data_scan_obj = dataplex_v1.DataScan(
             display_name=f"Scansione per {entity_id} ({datetime.datetime.utcnow().strftime('%Y%m%d-%H%M')})",
             description=f"Scansione {'aggiornamento' if entity_exists else 'creazione'} per entità {entity_id}, trigger: {os.path.basename(triggering_parquet_file_gcs_path)}",
-            data=dataplex_v1.DataScan.Data(entity=created_or_existing_entity.name),
-            data_profile=dataplex_v1.DataProfileSpec(), # Per schema discovery e statistiche
+            data=dataplex_v1.DataSource(entity=created_or_existing_entity.name),  # CORRETTO: 'data' invece di 'data_source'
+            data_profile_spec=dataplex_v1.DataProfileSpec(), # Questo sembra corretto
+            # Se vuoi specificare il tipo di scansione (ad es. solo profilo dati), puoi aggiungere:
+            # type_=dataplex_v1.DataScan.DataScanType.DATA_PROFILE # Assicurati che DataScanType sia importato o accessibile
         )
         print(f"[DATAPLEX DEBUG] Oggetto DataScan da creare: {data_scan_obj}")
 
