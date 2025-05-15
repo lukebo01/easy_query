@@ -1,0 +1,5 @@
+gcloud run services add-iam-policy-binding bronze-to-silver \
+    --member="allUsers" \
+    --role="roles/run.invoker" \
+    --region=europe-central2 \
+    --project=soy-transducer-456512-t0

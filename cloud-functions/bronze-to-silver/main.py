@@ -128,6 +128,19 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         metadata_client = dataplex_v1.MetadataServiceClient()
         print("[DATAPLEX DEBUG] MetadataServiceClient inizializzato.")
 
+        # === INIZIO MODIFICA ===
+        # La riga seguente causava l'AttributeError e non sembra necessaria per la logica successiva.
+        # Se serviva per qualche verifica preliminare, andrebbe usata con DataplexServiceClient
+        # e la sua logica andrebbe rivista. Per ora, la commentiamo.
+        #
+        # if 'list_assets_request' not in locals(): # Aggiunto per evitare NameError se list_assets_request non fosse definito
+        #     print("[DATAPLEX DEBUG] list_assets_request non definito, salto list_assets.")
+        # else:
+        #     print(f"[DATAPLEX DEBUG] Tentativo di listare gli assets nella zona: {zone_parent_path}")
+        #     # assets_iterator = metadata_client.list_assets(request=list_assets_request) # <- RIGA PROBLEMATICA
+        #     # print("[DATAPLEX DEBUG] Chiamata a list_assets effettuata (o saltata).")
+        # === FINE MODIFICA ===
+
         # --- Get or Create Entity ---
         created_or_existing_entity = None
         entity_exists = False
@@ -139,48 +152,32 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         except google.api_core.exceptions.NotFound:
             print(f"[DATAPLEX DEBUG] Entità '{entity_id}' non trovata. Tentativo di creazione...")
             try:
-                # Determiniamo il valore corretto per 'system'
-                # Se dataplex_v1.Entity.System.CLOUD_STORAGE dà errore, usa la stringa.
-                system_value = "CLOUD_STORAGE" # Fallback alla stringa
-                # --- Generazione del display_name ---
-                # entity_id è già sanitizzato (solo a-z, 0-9, _) e troncato a 63 caratteri.
-                # Esempio entity_id: silver_layer_bucket_silver_data_files_general_structured_csv_da
-
+                system_value = "CLOUD_STORAGE"
                 prefix_to_remove = "silver_layer_bucket_silver_data_files_general_"
                 
-                # Rimuovi il prefisso da entity_id se presente
                 if entity_id.startswith(prefix_to_remove):
                     base_name_for_display = entity_id[len(prefix_to_remove):]
                 else:
                     base_name_for_display = entity_id
 
-                # Rendi il nome un po' più leggibile sostituendo _ con spazio (opzionale)
-                # e mettendo la prima lettera maiuscola (opzionale)
-                # Se preferisci mantenere gli underscore, commenta/rimuovi la riga seguente
                 readable_base_name = base_name_for_display.replace('_', ' ').strip().capitalize()
-                if not readable_base_name: # Se dopo la rimozione del prefisso e lo strip è vuoto
-                    readable_base_name = entity_id.replace('_', ' ').strip().capitalize() # Usa l'entity_id completo
+                if not readable_base_name: 
+                    readable_base_name = entity_id.replace('_', ' ').strip().capitalize() 
 
-                # Aggiungi un prefisso standard come "Dati " o "Tabella "
-                display_prefix = "" # Puoi cambiarlo o rimuoverlo
-                
-                # Combina e tronca alla lunghezza massima di 63 caratteri
+                display_prefix = "" 
                 final_display_name = (display_prefix + readable_base_name)[:63]
-                
-                # Rimuovi eventuali spazi finali dopo la troncatura
                 final_display_name = final_display_name.strip()
 
-                # Assicurati che non sia vuoto dopo tutte le operazioni
                 if not final_display_name:
-                    final_display_name = entity_id[:63] # Fallback a entity_id troncato
+                    final_display_name = entity_id[:63]
 
                 entity_obj_to_create = dataplex_v1.Entity(
                     id=entity_id,
-                    display_name=final_display_name, # USA IL DISPLAY NAME MODIFICATO
+                    display_name=final_display_name, 
                     description=f"Dati da {entity_directory_gcs_path} (autogen.)",
                     data_path=entity_directory_gcs_path,
                     type_=dataplex_v1.Entity.Type.FILESET,
-                    asset=asset_full_name,
+                    asset=asset_full_name, # Questo richiede che l'asset 'silver-layer' esista!
                     system=system_value,
                     format_=dataplex_v1.StorageFormat(
                         format_=dataplex_v1.StorageFormat.Format.PARQUET,
@@ -191,17 +188,15 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
                 )
                 print(f"[DATAPLEX DEBUG] Oggetto Entity da creare (display_name='{final_display_name}'): {entity_obj_to_create}")
 
-                # CORREZIONE: Rimuovi 'entity_id' da qui
                 created_or_existing_entity = metadata_client.create_entity(
                     parent=zone_parent_path,
                     entity=entity_obj_to_create
-                    # entity_id=entity_id # RIMOSSO
                 )
                 print(f"[DATAPLEX DEBUG] Entità '{entity_id}' creata: {created_or_existing_entity.name}")
             except google.api_core.exceptions.AlreadyExists as ae_race:
                 print(f"[DATAPLEX WARNING] Entità creata concorrentemente (AlreadyExists): {ae_race}. Tento recupero.")
                 created_or_existing_entity = metadata_client.get_entity(name=entity_full_name)
-                entity_exists = True # Ora sappiamo che esiste
+                entity_exists = True 
             except Exception as entity_creation_error:
                 error_msg = f"Errore creazione entità '{entity_id}': {entity_creation_error}"
                 print(f"[DATAPLEX ERROR] {error_msg}")
@@ -217,6 +212,8 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
             return False, error_msg
 
         # --- Avvio della Scansione Dataplex ---
+        # (Il resto della funzione per avviare lo scan sembra corretto)
+        # ... (codice successivo per lo scan) ...
         print(f"[DATAPLEX DEBUG] Inizializzazione DataScanServiceClient...")
         scan_client = dataplex_v1.DataScanServiceClient()
         print("[DATAPLEX DEBUG] DataScanServiceClient inizializzato.")
@@ -263,7 +260,9 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         except Exception as create_scan_error:
             error_msg = f"Errore durante create_data_scan: {create_scan_error}"
             print(f"[DATAPLEX ERROR] {error_msg}")
-            return False, f"Errore durante create_data_scan: {error_msg}"
+            # Ritorna l'errore specifico, non un messaggio generico concatenato
+            return False, f"Errore durante create_data_scan: {str(create_scan_error)}"
+
 
     except ValueError as ve:
         error_msg = f"Errore di validazione input: {ve}"
@@ -273,7 +272,8 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         error_msg = f"Errore generico in Dataplex discovery: {e}"
         print(f"[DATAPLEX ERROR] {error_msg}")
         traceback.print_exc()
-        return False, f"Errore generico in Dataplex discovery: {error_msg}"
+        # Ritorna l'errore specifico, non un messaggio generico concatenato
+        return False, f"Errore generico in Dataplex discovery: {str(e)}"
 
 # --- FUNZIONI HELPER ESISTENTI ---
 def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
