@@ -29,8 +29,8 @@ from google.protobuf import field_mask_pb2
 SILVER_BUCKET_NAME = "silver-layer-bucket"
 
 # Prefissi radice all'interno del SILVER_BUCKET_NAME per separare file di dati e manifest
-SILVER_DATA_FILES_ROOT_PREFIX = "silver_data_files"  # Es: gs://silver-layer-bucket/silver_data_files/...
-SILVER_MANIFESTS_ROOT_PREFIX = "silver_manifests" # Es: gs://silver-layer-bucket/silver_manifests/...
+SILVER_DATA_FILES_ROOT_PREFIX = "files"  # Es: gs://silver-layer-bucket/files/...
+SILVER_MANIFESTS_ROOT_PREFIX = "manifests" # Es: gs://silver-layer-bucket/manifests/...
 
 # Configurazione Dataplex
 DATAPLEX_LOCATION = "europe-central2"  # Regione Dataplex, es. "europe-central2"
@@ -201,64 +201,125 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
 # --- FUNZIONI HELPER ESISTENTI ---
 def determine_silver_path_components(file_path_in_bronze: str, file_extension: str, content_type: Optional[str] = None) -> List[str]:
     """
-    Determina i componenti del percorso gerarchico (dominio, categoria, contesto, partizione data)
-    SENZA includere la radice "silver_data_files" o "silver_manifests".
+    Determina i componenti del percorso gerarchico in modo più compatto,
+    concentrandosi sul contenuto effettivo dei dati.
     'file_path_in_bronze' è il nome del blob nel bucket bronze (es. "/data/raw/ditto/file.txt").
     """
-    data_domain = "general"
+    # Utilizziamo prefissi abbreviati per domain
+    domain_map = {
+        "finance": "fin",
+        "sales": "sal",
+        "marketing": "mkt",
+        "hr": "hr",
+        "operations": "ops",
+        "it": "it",
+        "general": "gen"  # Default
+    }
+    
+    data_domain = "gen"  # Default abbreviato
     domain_patterns = {
         "finance": ["finance", "financial", "accounting", "invoice", "payment", "transaction"],
         "sales": ["sales", "revenue", "customer", "order", "product"],
         "marketing": ["marketing", "campaign", "advertisement", "promotion"],
-        "hr": ["hr", "human_resources", "employee", "personnel", "recruitment"], # Corretto human-resources
-        "operations": ["operations", "logistics", "inventory", "supply_chain"], # Corretto supply-chain
-        "it": ["it", "technology", "system", "software", "hardware", "tech", "dev"] # Aggiunto dev
+        "hr": ["hr", "human_resources", "employee", "personnel", "recruitment"],
+        "operations": ["operations", "logistics", "inventory", "supply_chain"],
+        "it": ["it", "technology", "system", "software", "hardware", "tech", "dev"]
     }
 
     lower_file_in_bronze = file_path_in_bronze.lower()
     for domain, patterns in domain_patterns.items():
         if any(pattern in lower_file_in_bronze for pattern in patterns):
-            data_domain = domain
+            data_domain = domain_map[domain]
             break
 
-    file_category = "unknown"
-    if file_extension in ["csv", "parquet", "json", "jsonl", "avro", "orc"]: file_category = "structured"
-    elif file_extension in ["pdf", "txt", "doc", "docx", "md", "rtf", "html"]: file_category = "document"
-    elif file_extension in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "svg", "webp", "heic"]: file_category = "image"
-    elif file_extension in ["xls", "xlsx", "ods", "numbers"]: file_category = "spreadsheet"
+    # Abbreviamo anche le categorie
+    category_map = {
+        "structured": "str",
+        "document": "doc",
+        "image": "img",
+        "spreadsheet": "spr",
+        "unknown": "unk"
+    }
+    
+    file_category = "unk"  # Default abbreviato
+    if file_extension in ["csv", "parquet", "json", "jsonl", "avro", "orc"]:
+        file_category = category_map["structured"]
+    elif file_extension in ["pdf", "txt", "doc", "docx", "md", "rtf", "html"]:
+        file_category = category_map["document"]
+    elif file_extension in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "webp", "svg"]:
+        file_category = category_map["image"]
+    elif file_extension in ["xls", "xlsx", "ods", "numbers"]:
+        file_category = category_map["spreadsheet"]
 
-    content_context = "generic" # Default più esplicito
+    # Semplifichiamo il context, usando direttamente il file_extension quando possibile
+    content_context = file_extension
     if content_type:
         ct_lower = content_type.lower()
-        if "application/json" in ct_lower: content_context = "json_data" # Underscore per coerenza GCS
-        elif "text/csv" in ct_lower: content_context = "csv_data"
-        elif "application/pdf" in ct_lower: content_context = "pdf_document"
-        elif "image/" in ct_lower: content_context = ct_lower.split('/')[-1].replace('jpeg', 'jpg') + "_image"
-        elif "text/plain" in ct_lower: content_context = "text_file"
-        elif "excel" in ct_lower or "spreadsheetml" in ct_lower: content_context = "excel_spreadsheet"
-
-    # Formato data modificato per evitare il formato di partizionamento Hive "key=value"
-    #date_partition_str = datetime.datetime.utcnow().strftime("date_%Y_%m_%d") # Formato non-Hive
+        if "application/json" in ct_lower:
+            content_context = "json"
+        elif "text/csv" in ct_lower:
+            content_context = "csv"
+        elif "application/pdf" in ct_lower:
+            content_context = "pdf"
+        elif "image/" in ct_lower:
+            content_context = ct_lower.split('/')[-1].replace('jpeg', 'jpg')
+        elif "text/plain" in ct_lower:
+            content_context = "txt"
+        elif "excel" in ct_lower or "spreadsheetml" in ct_lower:
+            content_context = "excel"
     
-    # da file_path_in_bronze scompongo il path nelle varie cartelle, eliminando il nome del file
-    
-    # Extract the directory path by removing everything after the last "/"
+    # Estrai il percorso della directory senza il nome del file
     directory_path = "/".join(file_path_in_bronze.split("/")[:-1])
-    print(f"Directory path (without filename): {directory_path}")
-
-    # Use the directory path instead of the full file path for consistency
-    # This ensures we only use folder structure without the filename
-    
     if directory_path.startswith("/"):
         directory_path = directory_path[1:]
-
+    
+    # Estrai il nome del file senza estensione per includerlo nel percorso
+    file_name = os.path.basename(file_path_in_bronze)
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    
+    # Identifica pattern comuni nei nomi dei file (prefissi come train_, test_, validation_, ecc.)
+    common_prefixes = ["train_", "test_", "val_", "validation_", "dev_", "sample_", "example_"]
+    base_file_name = file_name_no_ext
+    file_prefix = ""
+    
+    # Cerca prefissi comuni e separali dal nome base del file
+    for prefix in common_prefixes:
+        if file_name_no_ext.lower().startswith(prefix):
+            base_file_name = file_name_no_ext[len(prefix):]  # Nome base senza il prefisso
+            file_prefix = prefix[:-1]  # Rimuove l'underscore finale
+            break
+    
+    # Identifica la parte più significativa del percorso
+    significant_path = ""
+    if directory_path:
+        # Prendi solo le ultime 2 cartelle significative dal percorso originale
+        path_parts = directory_path.split('/')
+        if len(path_parts) > 2:
+            significant_path = "/".join(path_parts[-2:])
+        else:
+            significant_path = directory_path
+    
+    # Costruisci componenti di percorso più compatti e focalizzati
+    # Nuovo formato: dominio_categoria/tipo/percorso_significativo/nome_base
+    # Il nome base è comune tra file correlati (train_audio, test_audio → base = audio)
     path_components = [
-        data_domain,
-        file_category,
-        content_context,
-        directory_path
+        f"{data_domain}_{file_category}",  # Prefisso compatto dominio_categoria
+        content_context,                   # Tipo di contenuto
+        significant_path,                  # Percorso significativo
+        base_file_name                     # Nome base del file (senza prefissi comuni)
     ]
-    return [part for part in path_components if part] # Rimuove eventuali None o stringhe vuote
+    
+    # Se c'era un prefisso, lo aggiungiamo come metadato al nome della tabella finale
+    # ma non al percorso gerarchico, così i file correlati restano nello stesso percorso
+    if file_prefix and path_components:
+        # Opzionale: per BigQuery table naming, potresti voler includere il prefisso
+        # ma non influenza il percorso gerarchico
+        # Ad esempio, potrebbe essere aggiunto successivamente quando si costruisce il nome della tabella
+        print(f"File {file_name_no_ext} ha prefisso '{file_prefix}' e base '{base_file_name}'. "
+              f"Verranno raggruppati con altri file della stessa base.")
+    
+    # Pulisci il percorso rimuovendo componenti vuoti
+    return [part for part in path_components if part]
 
 def process_pdf(tmp_filename: str) -> pd.DataFrame:
     """Elabora un file PDF estraendo testo e metadata."""
