@@ -225,20 +225,31 @@ class _SearchPageState extends State<SearchPage> {
       
       // Aggiorna l'UI se ci sono file da elaborare
       if (filesToTransformBronze.isNotEmpty) {
+        // Preparare la lista di file da elaborare
+        final filesList = filesToTransformBronze.map((filePath) => {
+          'path': filePath,
+          'status': 'pending', // può essere: pending, processing, success, error
+          'message': '',
+          'silver_path': '',
+        }).toList();
+        
         if (mounted) {
           setState(() {
             _isProcessingFiles = true;
-            _filesToProcess = filesToTransformBronze.map((filePath) => {
-              'path': filePath,
-              'status': 'pending', // può essere: pending, processing, success, error
-              'message': '',
-              'silver_path': '',
-            }).toList();
-            
-            // Mostra il dialogo di elaborazione
-            _showProcessingDialog();
+            _filesToProcess = filesList;
           });
         }
+        
+        // Mostra il dialogo di elaborazione con lo stato iniziale
+        BuildContext? dialogContext;
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            dialogContext = context;
+            return _buildProcessingDialog(context);
+          },
+        );
         
         // Elabora i file uno alla volta e aggiorna l'UI in tempo reale
         List<String> transformedSilverFileUris = [];
@@ -257,11 +268,33 @@ class _SearchPageState extends State<SearchPage> {
             break;
           }
           
-          // Aggiorna lo stato a 'processing'
+          // Prima aggiorna i file precedenti con stato success se erano in elaborazione
           if (mounted) {
             setState(() {
+              for (int j = 0; j < i; j++) {
+                if (_filesToProcess[j]['status'] == 'processing') {
+                  _filesToProcess[j]['status'] = 'success';
+                }
+              }
+              
+              // Imposta il file corrente in elaborazione
               _filesToProcess[i]['status'] = 'processing';
+              _filesToProcess[i]['message'] = 'Elaborazione in corso...';
             });
+            
+            // Aggiorna immediatamente il dialogo se ancora aperto
+            if (dialogContext != null && Navigator.canPop(dialogContext!)) {
+              // Ricostruisci completamente il dialogo per aggiornare lo stato
+              Navigator.pop(dialogContext!);
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (BuildContext context) {
+                  dialogContext = context;
+                  return _buildProcessingDialog(context);
+                },
+              );
+            }
           }
           
           try {
@@ -284,6 +317,19 @@ class _SearchPageState extends State<SearchPage> {
                     _filesToProcess[i]['silver_path'] = silverPath;
                     _filesToProcess[i]['message'] = 'Elaborazione completata';
                   });
+                  
+                  // Aggiorna immediatamente il dialogo se ancora aperto
+                  if (dialogContext != null && Navigator.canPop(dialogContext!)) {
+                    Navigator.pop(dialogContext!);
+                    showDialog(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (BuildContext context) {
+                        dialogContext = context;
+                        return _buildProcessingDialog(context);
+                      },
+                    );
+                  }
                 }
                 
                 // Aggiorna gli schemi e i nomi delle tabelle
@@ -313,6 +359,19 @@ class _SearchPageState extends State<SearchPage> {
                   _filesToProcess[i]['status'] = 'error';
                   _filesToProcess[i]['message'] = result?['error'] ?? 'Errore sconosciuto';
                 });
+                
+                // Aggiorna immediatamente il dialogo se ancora aperto
+                if (dialogContext != null && Navigator.canPop(dialogContext!)) {
+                  Navigator.pop(dialogContext!);
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (BuildContext context) {
+                      dialogContext = context;
+                      return _buildProcessingDialog(context);
+                    },
+                  );
+                }
               }
             }
           } catch (e) {
@@ -322,6 +381,19 @@ class _SearchPageState extends State<SearchPage> {
                 _filesToProcess[i]['status'] = 'error';
                 _filesToProcess[i]['message'] = e.toString();
               });
+              
+              // Aggiorna immediatamente il dialogo se ancora aperto
+              if (dialogContext != null && Navigator.canPop(dialogContext!)) {
+                Navigator.pop(dialogContext!);
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (BuildContext context) {
+                    dialogContext = context;
+                    return _buildProcessingDialog(context);
+                  },
+                );
+              }
             }
           }
         }
@@ -570,218 +642,201 @@ class _SearchPageState extends State<SearchPage> {
       },
     );
   }
-
-  void _showProcessingDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, StateSetter dialogSetState) {
-            // Controlla se ci sono file esistenti in Silver da usare per abilitare lo skip
-            final hasExistingSilverData = _filesToProcess.length > 1 || 
-                          widget.geminiService.getLastContextAnalysis()?.containsKey('relevant_tables') == true;
+  
+  // Nuovo metodo per costruire il dialogo di elaborazione, sostituisce _showProcessingDialog
+  Widget _buildProcessingDialog(BuildContext context) {
+    // Controlla se ci sono file esistenti in Silver da usare per abilitare lo skip
+    final hasExistingSilverData = _filesToProcess.length > 1 || 
+                  widget.geminiService.getLastContextAnalysis()?.containsKey('relevant_tables') == true;
+    
+    return AlertDialog(
+      backgroundColor: const Color.fromARGB(255, 30, 30, 30),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      title: Row(
+        children: [
+          const Icon(Icons.sync, color: Colors.blue),
+          const SizedBox(width: 10),
+          const Text(
+            'Elaborazione File',
+            style: TextStyle(color: Colors.white),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'L\'AI-Agent ha individuato i seguenti file rilevanti per la tua richiesta:',
+              style: TextStyle(color: Colors.white),
+            ),
+            const SizedBox(height: 16),
+            // Lista dei file con status
+            SizedBox(
+              height: 200,
+              child: ListView.builder(
+                // Forziamo un rebuild completo ad ogni cambiamento di stato
+                key: ValueKey(DateTime.now().millisecondsSinceEpoch), 
+                shrinkWrap: true,
+                itemCount: _filesToProcess.length,
+                itemBuilder: (context, index) {
+                  final file = _filesToProcess[index];
+                  final status = file['status'];
+                  
+                  // Estrai il nome del file dal percorso
+                  final filePath = file['path'];
+                  final fileName = filePath.split('/').last;
+                  
+                  // Determina l'icona e il colore in base allo stato attuale
+                  Widget leadingWidget;
+                  if (status == 'processing') {
+                    leadingWidget = SizedBox(
+                      height: 24,
+                      width: 24,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.0,
+                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                      ),
+                    );
+                  } else if (status == 'success') {
+                    leadingWidget = const Icon(Icons.check_circle, color: Colors.green);
+                  } else if (status == 'error') {
+                    leadingWidget = const Icon(Icons.error, color: Colors.red);
+                  } else {
+                    leadingWidget = const Icon(Icons.circle_outlined, color: Colors.grey);
+                  }
+                  
+                  return ListTile(
+                    leading: leadingWidget,
+                    title: Text(
+                      fileName,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    subtitle: file['message'].isNotEmpty
+                      ? Text(
+                          file['message'],
+                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        )
+                      : null,
+                  );
+                },
+              ),
+            ),
             
-            return AlertDialog(
-              backgroundColor: const Color.fromARGB(255, 30, 30, 30),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              title: Row(
-                children: [
-                  const Icon(Icons.sync, color: Colors.blue),
-                  const SizedBox(width: 10),
-                  const Text(
-                    'Elaborazione File',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                ],
-              ),
-              content: SizedBox(
-                width: double.maxFinite,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+            // Stato della scansione Dataplex
+            if (_dataplexScanInProgress)
+              Padding(
+                padding: const EdgeInsets.only(top: 16.0),
+                child: Row(
                   children: [
-                    const Text(
-                      'L\'AI-Agent ha individuato i seguenti file rilevanti per la tua richiesta:',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    const SizedBox(height: 16),
-                    // Lista dei file con status
-                    SizedBox(
-                      height: 200,
-                      child: ListView.builder(
-                        key: ValueKey(_filesToProcess.map((f) => "${f['path']}-${f['status']}").join(",")), 
-                        shrinkWrap: true,
-                        itemCount: _filesToProcess.length,
-                        itemBuilder: (context, index) {
-                          final file = _filesToProcess[index];
-                          final status = file['status'];
-                          
-                          // Estrai il nome del file dal percorso
-                          final filePath = file['path'];
-                          final fileName = filePath.split('/').last;
-                          
-                          IconData statusIcon;
-                          Color statusColor;
-                          switch (status) {
-                            case 'success':
-                              statusIcon = Icons.check_circle;
-                              statusColor = Colors.green;
-                              break;
-                            case 'error':
-                              statusIcon = Icons.error;
-                              statusColor = Colors.red;
-                              break;
-                            case 'processing':
-                              statusIcon = Icons.sync;
-                              statusColor = Colors.blue;
-                              break;
-                            default:
-                              statusIcon = Icons.circle_outlined;
-                              statusColor = Colors.grey;
-                          }
-                          
-                          return ListTile(
-                            leading: status == 'processing'
-                              ? SizedBox(
-                                  height: 24,
-                                  width: 24,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.0,
-                                    valueColor: AlwaysStoppedAnimation<Color>(statusColor),
-                                  ),
-                                )
-                              : Icon(statusIcon, color: statusColor),
-                            title: Text(
-                              fileName,
-                              style: const TextStyle(color: Colors.white),
-                            ),
-                            subtitle: file['message'].isNotEmpty
-                              ? Text(
-                                  file['message'],
-                                  style: const TextStyle(color: Colors.white70, fontSize: 12),
-                                )
-                              : null,
-                          );
-                        },
+                    const SizedBox(
+                      height: 16,
+                      width: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.0,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
                       ),
                     ),
-                    
-                    // Stato della scansione Dataplex
-                    if (_dataplexScanInProgress)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16.0),
-                        child: Row(
-                          children: [
-                            const SizedBox(
-                              height: 16,
-                              width: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.0,
-                                valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            const Expanded(
-                              child: Text(
-                                'Scansione Dataplex in corso. Questo processo potrebbe richiedere alcuni minuti...',
-                                style: TextStyle(color: Colors.blue, fontSize: 12),
-                              ),
-                            ),
-                          ],
-                        ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Scansione Dataplex in corso. Questo processo potrebbe richiedere alcuni minuti...',
+                        style: TextStyle(color: Colors.blue, fontSize: 12),
                       ),
-                    
-                    // Informazioni di elaborazione
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Le tabelle saranno disponibili al completamento della scansione Dataplex.',
-                      style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Nota: La creazione di tabelle BigQuery potrebbe richiedere fino a 10-15 minuti.',
-                      style: TextStyle(color: Colors.orange, fontSize: 12),
                     ),
                   ],
                 ),
               ),
-              actions: [
-                // Mostra il pulsante Skip solo se ci sono file esistenti in Silver da usare
-                if (hasExistingSilverData)
-                  TextButton(
-                    style: TextButton.styleFrom(foregroundColor: Colors.white70),
-                    child: const Text('Skip'),
-                    onPressed: () {
-                      setState(() {
-                        _skipRequested = true;
-                      });
-                      dialogSetState(() {}); // Aggiorna la UI del dialogo
-                      
-                      // Se Dataplex è in corso, chiudi il dialogo e continua
-                      if (_dataplexScanInProgress) {
-                        Navigator.of(context).pop();
-                      } else {
-                        // Altrimenti aggiungi un messaggio e mostra per qualche secondo
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Processamento in background avviato. Procedendo con i dati disponibili.'),
-                            duration: Duration(seconds: 5),
-                          ),
-                        );
-                        
-                        // Ritarda la chiusura per permettere all'utente di vedere il messaggio
-                        Future.delayed(const Duration(seconds: 1), () {
-                          if (Navigator.canPop(context)) {
-                            Navigator.of(context).pop();
-                          }
-                        });
-                      }
-                    },
+            
+            // Informazioni di elaborazione
+            const SizedBox(height: 16),
+            const Text(
+              'Le tabelle saranno disponibili al completamento della scansione Dataplex.',
+              style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Nota: La creazione di tabelle BigQuery potrebbe richiedere fino a 10-15 minuti.',
+              style: TextStyle(color: Colors.orange, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        // Mostra il pulsante Skip solo se ci sono file esistenti in Silver da usare
+        if (hasExistingSilverData)
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.white70),
+            child: const Text('Skip'),
+            onPressed: () {
+              if (mounted) {
+                setState(() {
+                  _skipRequested = true;
+                });
+              }
+              
+              // Se Dataplex è in corso, chiudi il dialogo e continua
+              if (_dataplexScanInProgress) {
+                Navigator.of(context).pop();
+              } else {
+                // Altrimenti aggiungi un messaggio e mostra per qualche secondo
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Processamento in background avviato. Procedendo con i dati disponibili.'),
+                    duration: Duration(seconds: 5),
                   ),
+                );
                 
-                // Aggiungi un pulsante per informare l'utente che deve aspettare
-                TextButton(
-                  style: TextButton.styleFrom(foregroundColor: Colors.white),
-                  child: const Text('Ho capito'),
-                  onPressed: () {
-                    // Mostra un avviso all'utente
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Attendi il completamento dell\'elaborazione prima di procedere.'),
-                        duration: Duration(seconds: 3),
-                      ),
-                    );
-                    
-                    // Chiudi il dialogo solo se tutti i file sono stati processati
-                    bool allProcessed = !_filesToProcess.any((file) => 
-                      file['status'] == 'pending' || file['status'] == 'processing');
-                    
-                    if (allProcessed && !_dataplexScanInProgress) {
-                      Navigator.of(context).pop();
-                      
-                      // Se ci sono file trasformati, mostra anche il dialogo di stato Dataplex
-                      List<String> transformedFiles = _filesToProcess
-                          .where((file) => file['status'] == 'success' && file['silver_path'] != null)
-                          .map((file) => file['silver_path'] as String)
-                          .toList();
-                      
-                      if (transformedFiles.isNotEmpty) {
-                        _showDataplexStatusDialog(transformedFiles);
-                      }
-                    }
-                  },
-                ),
-              ],
+                // Ritarda la chiusura per permettere all'utente di vedere il messaggio
+                Future.delayed(const Duration(seconds: 1), () {
+                  if (Navigator.canPop(context)) {
+                    Navigator.of(context).pop();
+                  }
+                });
+              }
+            },
+          ),
+        
+        // Aggiungi un pulsante per informare l'utente che deve aspettare
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.white),
+          child: const Text('Ho capito'),
+          onPressed: () {
+            // Mostra un avviso all'utente
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Attendi il completamento dell\'elaborazione prima di procedere.'),
+                duration: Duration(seconds: 3),
+              ),
             );
+            
+            // Chiudi il dialogo solo se tutti i file sono stati processati
+            bool allProcessed = !_filesToProcess.any((file) => 
+              file['status'] == 'pending' || file['status'] == 'processing');
+            
+            if (allProcessed && !_dataplexScanInProgress) {
+              Navigator.of(context).pop();
+              
+              // Se ci sono file trasformati, mostra anche il dialogo di stato Dataplex
+              List<String> transformedFiles = _filesToProcess
+                  .where((file) => file['status'] == 'success' && file['silver_path'] != null)
+                  .map((file) => file['silver_path'] as String)
+                  .toList();
+              
+              if (transformedFiles.isNotEmpty) {
+                _showDataplexStatusDialog(transformedFiles);
+              }
+            }
           },
-        );
-      },
+        ),
+      ],
     );
   }
-  
+
   // --- Intelligent File Upload Methods ---
 
   Future<void> _pickFile(StateSetter dialogSetState) async {
@@ -1713,7 +1768,14 @@ class _SearchPageState extends State<SearchPage> {
           setState(() {
             int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
             if (index >= 0) {
+              // Imposta prima i file precedenti a success se erano in processing
+              for (int j = 0; j < index; j++) {
+                if (_filesToProcess[j]['status'] == 'processing') {
+                  _filesToProcess[j]['status'] = 'success';
+                }
+              }
               _filesToProcess[index]['status'] = 'processing';
+              _filesToProcess[index]['message'] = 'Elaborazione in background...';
             }
           });
         }
