@@ -1,0 +1,26 @@
+# Google Cloud Functions Framework (necessario per Cloud Run con HTTP trigger)
+functions-framework==3.5.0
+# Google Cloud Storage client
+google-cloud-storage==2.16.0
+# Google Cloud Document AI client
+google-cloud-documentai==2.26.0  # O la versione più recente che trovi
+# Google Cloud Natural Language API client
+google-cloud-language==2.13.3   # O la versione più recente che trovi
+# Web framework (usato sotto il cofano da functions-framework)
+# flask==2.3.3 # Non è strettamente necessario listarlo, functions-framework lo gestisce
+# Data handling
+pandas==2.2.2
+# Supporto per file Parquet (necessario per df.to_parquet)
+pyarrow==15.0.2
+# PDF processing
+PyPDF2>=3.0.0
+# Image processing
+Pillow>=9.0.0
+# Altre dipendenze
+requests==2.31.0
+
+gcsfs
+
+# Aggiungi alle dipendenze esistenti
+google-cloud-dataplex==2.3.0
+google.api_core

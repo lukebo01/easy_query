@@ -848,7 +848,7 @@ def bronze_to_silver(request: Request):
     """
     Funzione HTTP per convertire file dal bucket bronze al bucket silver.
     Salva i dati Parquet in una struttura di cartelle e i manifest JSON in una struttura parallela.
-    Poi avvia una scansione Dataplex per aggiornare automaticamente il catalogo.
+    La scansione Dataplex è ora gestita da una funzione separata.
     """
     # Gestione della richiesta preflight CORS (OPTIONS)
     if request.method == 'OPTIONS':
@@ -881,6 +881,8 @@ def bronze_to_silver(request: Request):
         full_path_from_caller = data_payload["path"]
         force_processing = data_payload.get("force_processing", False)
         custom_data_prefix_override = data_payload.get("custom_prefix", None)
+        # Manteniamo il parametro skip_dataplex per retrocompatibilità, ma non lo utilizziamo più attivamente
+        skip_dataplex = data_payload.get("skip_dataplex", True)  # Default a True ora che la scansione è separata
 
         # Handle both gs:// URI format and simple bucket/path format
         if full_path_from_caller.startswith("gs://"):
@@ -1000,42 +1002,14 @@ def bronze_to_silver(request: Request):
                 df_data_only
             )
             
-            # 6. Avvia la scansione Dataplex
-            dataplex_success = False
-            dataplex_info = "Scansione Dataplex non eseguita"
+            # 6. La scansione Dataplex è ora gestita separatamente - aggiorniamo solo i messaggi informativi
+            dataplex_info = "La scansione Dataplex è ora gestita separatamente tramite la funzione batch-dataplex-scan"
             
             # Identifica il project_id corrente
             project_id = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
             if not project_id:
                 print("ATTENZIONE: Impossibile determinare il project_id dagli env vars.")
                 project_id = "soy-transducer-456512-t0"  # Fallback project ID
-            
-            try:
-                # Avvia la scansione Dataplex
-                dataplex_success, result_data = trigger_dataplex_discovery(
-                        project_id,
-                        uri_parquet_in_silver
-                    )
-                
-                if dataplex_success and isinstance(result_data, dict):
-                    dataplex_info = result_data.get("message", "Successo, ma nessun messaggio dettagliato.")
-                    discovered_entity_id = result_data.get("entity_id") # Ottieni l'entity_id
-                    print(f"Trigger Dataplex per '{uri_parquet_in_silver}' completato: {dataplex_info}")
-                else: # Fallimento o formato risposta inatteso
-                    # Check if it's a quota exceeded error specifically
-                    is_quota_error = isinstance(result_data, dict) and result_data.get("error_type") == "quota_exceeded"
-                    
-                    if is_quota_error:
-                        dataplex_info = result_data.get("message", "Dataplex API quota exceeded")
-                        print(f"[QUOTA WARNING] Trigger Dataplex per '{uri_parquet_in_silver}' ha raggiunto il limite di quota: {dataplex_info}")
-                    else:
-                        dataplex_info = result_data if isinstance(result_data, str) else "Fallimento con formato risposta inatteso."
-                        print(f"Avviso: Trigger Dataplex per '{uri_parquet_in_silver}' fallito: {dataplex_info}")
-            
-            except Exception as e_dataplex:
-                dataplex_success = False
-                dataplex_info = f"Errore durante la scansione Dataplex: {str(e_dataplex)}"
-                traceback.print_exc()
             
             # 7. Prepara le informazioni sulle colonne per la risposta
             processed_columns_with_types = prepare_bigquery_columns_info(df_data_only)
@@ -1050,22 +1024,14 @@ def bronze_to_silver(request: Request):
             # 9. Prepara e restituisci la risposta
             response_data = {
                 "status": "success",
-                "message": f"Processed gs://{bronze_bucket_name}{blob_name_in_gcs} to Silver: {uri_parquet_in_silver}. Dataplex discovery triggered.",
+                "message": f"Processed gs://{bronze_bucket_name}{blob_name_in_gcs} to Silver: {uri_parquet_in_silver}",
                 "silver_path": uri_parquet_in_silver,
                 "columns": processed_columns_with_types,
                 "record_count": len(df_data_only),
                 "silver_path_prefix_base": silver_data_files_base_path,
-                "bigquery_table": expected_bq_table_ref,
-                "dataplex_status": "success" if dataplex_success else "error",
-                "dataplex_info": dataplex_info,
-                "note": "BigQuery table will be created automatically by Dataplex discovery process"
+                "bigquery_table": expected_bq_table_ref
             }
             
-            # Add quota warning if applicable
-            if isinstance(result_data, dict) and result_data.get("error_type") == "quota_exceeded":
-                response_data["dataplex_status"] = "quota_exceeded"
-                response_data["note"] = "File uploaded successfully. BigQuery table will be created when the Dataplex quota resets (typically within a few minutes)."
-                
             return (response_data, 200, response_cors_headers)
         
         else:

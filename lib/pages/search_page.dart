@@ -71,6 +71,12 @@ class _SearchPageState extends State<SearchPage> {
   bool _needsRefresh = false;
   // --- End State for Upload Dialog ---
 
+  // Stato per il processo di elaborazione file
+  bool _isProcessingFiles = false;
+  List<Map<String, dynamic>> _filesToProcess = [];
+  bool _dataplexScanInProgress = false;
+  bool _skipRequested = false;
+
   @override
   void initState() {
     super.initState();
@@ -87,48 +93,6 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
-  Future<String> _getLatestAvailablePartition(
-    String datasetId, 
-    String tableId,
-    List<Map<String, dynamic>> bronzeMetadata // Passa i metadati bronze
-  ) async {
-    // Strategia 1: Prova a derivare dall'ultimo file bronze processato
-    if (bronzeMetadata.isNotEmpty) {
-      try {
-        // Ordina i metadata per metadata_ingestion_time se non già ordinati
-        // (La tua query li ordina già DESC)
-        final latestBronzeFile = bronzeMetadata.first;
-        final String? eventTimeString = latestBronzeFile['event_time'] as String?; // o metadata_ingestion_time
-        
-        if (eventTimeString != null) {
-          // Il formato dai log è "2025-05-11T20:53:20.%fZ"
-          // Dobbiamo normalizzarlo per DateTime.parse
-          final normalizedEventTime = eventTimeString.replaceFirstMapped(
-            RegExp(r'\.%f(Z?)$'), // Gestisce %f o %fZ
-            (match) => ".000${match.group(1) ?? 'Z'}" // Sostituisci con millisecondi fissi
-          );
-
-          final DateTime eventDate = DateTime.parse(normalizedEventTime);
-          final String derivedPartition = "${eventDate.year}/${eventDate.month.toString().padLeft(2, '0')}/${eventDate.day.toString().padLeft(2, '0')}";
-          log('Derived latest partition for sampling: $derivedPartition from bronze metadata');
-          return derivedPartition;
-        }
-      } catch (e) {
-        log('Could not derive partition from bronze metadata: $e');
-      }
-    }
-
-    // Strategia 2: Prova a interrogare INFORMATION_SCHEMA.PARTITIONS (più complesso, richiede permessi)
-    // Per ora, usiamo un fallback se la strategia 1 fallisce
-    // TODO: Implementare una logica di fallback migliore se necessario, 
-    //       come interrogare INFORMATION_SCHEMA.PARTITIONS per la partizione MAX.
-    //       SELECT MAX(partition_id) FROM `progetto.dataset.INFORMATION_SCHEMA.PARTITIONS` WHERE table_name = 'nome_tabella'
-
-    log('Falling back to a default recent partition for sampling (adjust if needed).');
-    // Fallback a una data recente (ESEMPIO! Adatta o rendi più dinamico)
-    final now = DateTime.now().toUtc(); // Usa UTC per coerenza con le partizioni GCS
-    return "${now.year}/${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}";
-  }
 
 
   Future<void> _processQuestion(String question) async {
@@ -144,10 +108,16 @@ class _SearchPageState extends State<SearchPage> {
         _isLoading = true;
         _errorMessage = '';
         _currentExecutingQuery = 'Translating request to English...';
+        // Reset stato elaborazione file
+        _isProcessingFiles = false;
+        _filesToProcess = [];
+        _dataplexScanInProgress = false;
+        _skipRequested = false;
       });
     }
 
     List<Map<String, dynamic>> cloudFilesMetadata = []; // Inizializza per il blocco finally
+    bool dataplexWasSkipped = false;
 
     try {
       final projectId = widget.bigQueryService.projectId;
@@ -233,68 +203,276 @@ class _SearchPageState extends State<SearchPage> {
         cloudStorageService: widget.cloudStorageService,
         bronzeToSilverUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/bronze-to-silver',
         silverToGoldUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
+        batchDataplexScanUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/batch-dataplex-scan',
       );
 
       if (mounted) {
-        setState(() { _currentExecutingQuery = 'Starting Data Trasformation pipeline...'; });
+        setState(() { _currentExecutingQuery = 'Starting Data Transformation pipeline...'; });
       }
       
-      final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
-        question, schemas, tableNames, sampleData, cloudFilesMetadata,
-      );
-      
-      final contextAnalysis = orchestrationResult['contextAnalysis'];
-      // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
-      List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
-          ?.map((item) => item as Map<String, dynamic>)
-          ?.toList() ?? [];
-      final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
-          ?.map((item) => item.toString())
-          ?.toList() ?? [];
-      
-      
-      if (mounted) {
-        setState(() { _currentExecutingQuery = 'Building optimized query...'; });
-      }
-
-      final sqlQuery = await widget.geminiService.generateSqlQuery(
+      // Ottieni i risultati iniziali dell'analisi del contesto
+      final contextAnalysis = await widget.geminiService.analyzeQueryContext(
         question,
-        jsonEncode(updatedSchemas), 
-        jsonEncode(updatedTableNames), 
-        sampleData: sampleData,
-        contextAnalysis: contextAnalysis,
+        jsonEncode(schemas),
+        jsonEncode(cloudFilesMetadata),
+        tableNames,
+        sampleData,
       );
+      
+      // Estrai i file suggeriti per la trasformazione
+      final List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
+      final List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
+      
+      // Aggiorna l'UI se ci sono file da elaborare
+      if (filesToTransformBronze.isNotEmpty) {
+        if (mounted) {
+          setState(() {
+            _isProcessingFiles = true;
+            _filesToProcess = filesToTransformBronze.map((filePath) => {
+              'path': filePath,
+              'status': 'pending', // può essere: pending, processing, success, error
+              'message': '',
+              'silver_path': '',
+            }).toList();
+            
+            // Mostra il dialogo di elaborazione
+            _showProcessingDialog();
+          });
+        }
+        
+        // Elabora i file uno alla volta e aggiorna l'UI in tempo reale
+        List<String> transformedSilverFileUris = [];
+        List<Map<String, dynamic>> updatedSchemas = List<Map<String, dynamic>>.from(schemas);
+        List<String> updatedTableNames = List<String>.from(tableNames);
+        
+        for (int i = 0; i < _filesToProcess.length; i++) {
+          if (_skipRequested && _filesToProcess.length > 1) {
+            // Se lo skip è stato richiesto e ci sono più file, interrompi l'elaborazione
+            // ma continua in background
+            _processRemainingFilesInBackground(
+              dataOrchestrationService, 
+              _filesToProcess.sublist(i),
+              transformedSilverFileUris
+            );
+            break;
+          }
+          
+          // Aggiorna lo stato a 'processing'
+          if (mounted) {
+            setState(() {
+              _filesToProcess[i]['status'] = 'processing';
+            });
+          }
+          
+          try {
+            // Elabora il file
+            final bronzeFileGcsUri = _filesToProcess[i]['path'];
+            final result = await dataOrchestrationService.transformBronzeToSilver(
+              bronzeFileGcsUri,
+              skipDataplex: true // Saltiamo Dataplex individuale
+            );
+            
+            if (result != null && result['status'] == 'success') {
+              final silverPath = result['silver_path'] as String?;
+              if (silverPath != null && silverPath.isNotEmpty) {
+                transformedSilverFileUris.add(silverPath);
+                
+                // Aggiorna lo stato a 'success'
+                if (mounted) {
+                  setState(() {
+                    _filesToProcess[i]['status'] = 'success';
+                    _filesToProcess[i]['silver_path'] = silverPath;
+                    _filesToProcess[i]['message'] = 'Elaborazione completata';
+                  });
+                }
+                
+                // Aggiorna gli schemi e i nomi delle tabelle
+                final bigQueryTableName = result['bigquery_table'] as String?;
+                if (bigQueryTableName != null && bigQueryTableName.isNotEmpty) {
+                  if (!updatedTableNames.contains(bigQueryTableName)) {
+                    updatedTableNames.add(bigQueryTableName);
+                  }
+                  
+                  // Aggiungi informazioni dello schema
+                  if (result['columns'] != null && result['columns'] is List) {
+                    final List<dynamic> columnsRaw = result['columns'] as List<dynamic>;
+                    if (columnsRaw.isNotEmpty) {
+                      Map<String, dynamic> schemaMap = {
+                        'table_name': bigQueryTableName,
+                        'columns': columnsRaw
+                      };
+                      updatedSchemas.add(schemaMap);
+                    }
+                  }
+                }
+              }
+            } else {
+              // Aggiorna lo stato a 'error'
+              if (mounted) {
+                setState(() {
+                  _filesToProcess[i]['status'] = 'error';
+                  _filesToProcess[i]['message'] = result?['error'] ?? 'Errore sconosciuto';
+                });
+              }
+            }
+          } catch (e) {
+            // Gestione errori
+            if (mounted) {
+              setState(() {
+                _filesToProcess[i]['status'] = 'error';
+                _filesToProcess[i]['message'] = e.toString();
+              });
+            }
+          }
+        }
+        
+        // Se ci sono file trasformati e non è stato richiesto di saltare
+        if (transformedSilverFileUris.isNotEmpty && !_skipRequested) {
+          // Avvia la scansione Dataplex batch
+          if (mounted) {
+            setState(() {
+              _dataplexScanInProgress = true;
+            });
+          }
+          
+          try {
+            final dataplexResult = await dataOrchestrationService.triggerBatchDataplexScan(transformedSilverFileUris);
+            dataplexWasSkipped = false;
+            
+            if (mounted) {
+              setState(() {
+                _dataplexScanInProgress = false;
+              });
+            }
+          } catch (e) {
+            print('Error triggering Dataplex scan: $e');
+            dataplexWasSkipped = true;
+            
+            if (mounted) {
+              setState(() {
+                _dataplexScanInProgress = false;
+              });
+            }
+          }
+        } else if (_skipRequested) {
+          dataplexWasSkipped = true;
+        }
+        
+        // Nasconde il dialogo se è stato mostrato
+        if (mounted && Navigator.canPop(context)) {
+          Navigator.pop(context);
+        }
+        
+        // Continua con il resto della pipeline usando solo gli schemi e le tabelle aggiornate
+        if (mounted) {
+          setState(() {
+            _isProcessingFiles = false;
+            _currentExecutingQuery = 'Building optimized query...';
+          });
+        }
+        
+        final sqlQuery = await widget.geminiService.generateSqlQuery(
+          question,
+          jsonEncode(updatedSchemas), 
+          jsonEncode(updatedTableNames), 
+          sampleData: sampleData,
+          contextAnalysis: contextAnalysis,
+        );
 
-      final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
-                                  .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
-                                  .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
-      log('Executing SQL query from Gemini: $cleanedSqlQuery');
+        final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
+                                    .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
+                                    .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+        log('Executing SQL query from Gemini: $cleanedSqlQuery');
 
-      if (mounted) {
-        setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+        if (mounted) {
+          setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+        }
+
+        final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
+        log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
+
+        if (mounted) {
+          setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
+        }
+
+        final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
+
+        if (!mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => ResultPage(
+            question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
+          )),
+        );
+      } else {
+        // Nessun file da elaborare, procedi normalmente
+        final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
+          question, schemas, tableNames, sampleData, cloudFilesMetadata,
+          skipDataplex: true,
+        );
+        
+        final contextAnalysis = orchestrationResult['contextAnalysis'];
+        // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
+        List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
+            ?.map((item) => item as Map<String, dynamic>)
+            ?.toList() ?? [];
+        final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
+            ?.map((item) => item.toString())
+            ?.toList() ?? [];
+            
+        // Controlla se Dataplex è stato saltato e ci sono nuovi file
+        dataplexWasSkipped = orchestrationResult['dataplexWasSkipped'] == true;
+        final transformedSilverFileUris = (orchestrationResult['transformedSilverFileUris'] as List?)?.cast<String>() ?? [];
+        
+        if (dataplexWasSkipped && transformedSilverFileUris.isNotEmpty) {
+          // Mostra un avviso all'utente sulla disponibilità dei dati
+          _showDataplexStatusDialog(transformedSilverFileUris);
+        }
+        
+        if (mounted) {
+          setState(() { _currentExecutingQuery = 'Building optimized query...'; });
+        }
+
+        final sqlQuery = await widget.geminiService.generateSqlQuery(
+          question,
+          jsonEncode(updatedSchemas), 
+          jsonEncode(updatedTableNames), 
+          sampleData: sampleData,
+          contextAnalysis: contextAnalysis,
+        );
+
+        final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
+                                    .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
+                                    .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+        log('Executing SQL query from Gemini: $cleanedSqlQuery');
+
+        if (mounted) {
+          setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+        }
+
+        final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
+        log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
+
+        if (mounted) {
+          setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
+        }
+
+        final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
+
+        if (!mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => ResultPage(
+            question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
+          )),
+        );
       }
-
-      final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
-      log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
-
-      if (mounted) {
-        setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
-      }
-
-      final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
-
-      if (!mounted) return;
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => ResultPage(
-          question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
-        )),
-      );
-    } catch (e, stackTrace) { // Aggiunto stackTrace
+    } catch (e, stackTrace) {
       log('Error processing question: ${e.toString()}', error: e, stackTrace: stackTrace);
       if (mounted) {
         setState(() {
           _errorMessage = e.toString().replaceFirst('Exception: ', '');
+          _isProcessingFiles = false;
         });
       }
     } finally {
@@ -302,12 +480,308 @@ class _SearchPageState extends State<SearchPage> {
         setState(() {
           _isLoading = false;
           _currentExecutingQuery = null;
+          _isProcessingFiles = false;
+          _dataplexScanInProgress = false;
         });
       }
     }
   }
+  
+  // Nuovo metodo per mostrare un dialogo sullo stato di Dataplex
+  void _showDataplexStatusDialog(List<String> transformedFiles) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color.fromARGB(255, 30, 30, 30),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.info_outline, color: Colors.blueAccent),
+              const SizedBox(width: 10),
+              const Text(
+                'Nuovi dati in preparazione',
+                style: TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Stiamo preparando nuovi dati per la tua ricerca. Potrebbero non essere immediatamente disponibili.',
+                  style: TextStyle(color: Colors.white),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Questi file sono stati elaborati e saranno accessibili tramite BigQuery:',
+                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  padding: const EdgeInsets.all(8),
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: transformedFiles.length,
+                    itemBuilder: (context, index) {
+                      final filePath = transformedFiles[index];
+                      // Estrai solo il nome del file per visualizzazione più pulita
+                      final fileName = filePath.split('/').last;
+                      return Text(
+                        fileName,
+                        style: const TextStyle(color: Colors.green, fontSize: 12),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Per includere questi dati nei risultati, attendi fino a 10-15 minuti e riformula la tua domanda.',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Questo è normale: Dataplex deve eseguire una scansione e creare le tabelle BigQuery.',
+                  style: TextStyle(color: Colors.orange, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.grey),
+              child: const Text('Ho capito'),
+              onPressed: () => Navigator.of(dialogContext).pop(),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
-
+  void _showProcessingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, StateSetter dialogSetState) {
+            // Controlla se ci sono file esistenti in Silver da usare per abilitare lo skip
+            final hasExistingSilverData = _filesToProcess.length > 1 || 
+                          widget.geminiService.getLastContextAnalysis()?.containsKey('relevant_tables') == true;
+            
+            return AlertDialog(
+              backgroundColor: const Color.fromARGB(255, 30, 30, 30),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  const Icon(Icons.sync, color: Colors.blue),
+                  const SizedBox(width: 10),
+                  const Text(
+                    'Elaborazione File',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'L\'AI-Agent ha individuato i seguenti file rilevanti per la tua richiesta:',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 16),
+                    // Lista dei file con status
+                    SizedBox(
+                      height: 200,
+                      child: ListView.builder(
+                        key: ValueKey(_filesToProcess.map((f) => "${f['path']}-${f['status']}").join(",")), 
+                        shrinkWrap: true,
+                        itemCount: _filesToProcess.length,
+                        itemBuilder: (context, index) {
+                          final file = _filesToProcess[index];
+                          final status = file['status'];
+                          
+                          // Estrai il nome del file dal percorso
+                          final filePath = file['path'];
+                          final fileName = filePath.split('/').last;
+                          
+                          IconData statusIcon;
+                          Color statusColor;
+                          switch (status) {
+                            case 'success':
+                              statusIcon = Icons.check_circle;
+                              statusColor = Colors.green;
+                              break;
+                            case 'error':
+                              statusIcon = Icons.error;
+                              statusColor = Colors.red;
+                              break;
+                            case 'processing':
+                              statusIcon = Icons.sync;
+                              statusColor = Colors.blue;
+                              break;
+                            default:
+                              statusIcon = Icons.circle_outlined;
+                              statusColor = Colors.grey;
+                          }
+                          
+                          return ListTile(
+                            leading: status == 'processing'
+                              ? SizedBox(
+                                  height: 24,
+                                  width: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.0,
+                                    valueColor: AlwaysStoppedAnimation<Color>(statusColor),
+                                  ),
+                                )
+                              : Icon(statusIcon, color: statusColor),
+                            title: Text(
+                              fileName,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            subtitle: file['message'].isNotEmpty
+                              ? Text(
+                                  file['message'],
+                                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                )
+                              : null,
+                          );
+                        },
+                      ),
+                    ),
+                    
+                    // Stato della scansione Dataplex
+                    if (_dataplexScanInProgress)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 16.0),
+                        child: Row(
+                          children: [
+                            const SizedBox(
+                              height: 16,
+                              width: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.0,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            const Expanded(
+                              child: Text(
+                                'Scansione Dataplex in corso. Questo processo potrebbe richiedere alcuni minuti...',
+                                style: TextStyle(color: Colors.blue, fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    
+                    // Informazioni di elaborazione
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Le tabelle saranno disponibili al completamento della scansione Dataplex.',
+                      style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Nota: La creazione di tabelle BigQuery potrebbe richiedere fino a 10-15 minuti.',
+                      style: TextStyle(color: Colors.orange, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                // Mostra il pulsante Skip solo se ci sono file esistenti in Silver da usare
+                if (hasExistingSilverData)
+                  TextButton(
+                    style: TextButton.styleFrom(foregroundColor: Colors.white70),
+                    child: const Text('Skip'),
+                    onPressed: () {
+                      setState(() {
+                        _skipRequested = true;
+                      });
+                      dialogSetState(() {}); // Aggiorna la UI del dialogo
+                      
+                      // Se Dataplex è in corso, chiudi il dialogo e continua
+                      if (_dataplexScanInProgress) {
+                        Navigator.of(context).pop();
+                      } else {
+                        // Altrimenti aggiungi un messaggio e mostra per qualche secondo
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Processamento in background avviato. Procedendo con i dati disponibili.'),
+                            duration: Duration(seconds: 5),
+                          ),
+                        );
+                        
+                        // Ritarda la chiusura per permettere all'utente di vedere il messaggio
+                        Future.delayed(const Duration(seconds: 1), () {
+                          if (Navigator.canPop(context)) {
+                            Navigator.of(context).pop();
+                          }
+                        });
+                      }
+                    },
+                  ),
+                
+                // Aggiungi un pulsante per informare l'utente che deve aspettare
+                TextButton(
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  child: const Text('Ho capito'),
+                  onPressed: () {
+                    // Mostra un avviso all'utente
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Attendi il completamento dell\'elaborazione prima di procedere.'),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                    
+                    // Chiudi il dialogo solo se tutti i file sono stati processati
+                    bool allProcessed = !_filesToProcess.any((file) => 
+                      file['status'] == 'pending' || file['status'] == 'processing');
+                    
+                    if (allProcessed && !_dataplexScanInProgress) {
+                      Navigator.of(context).pop();
+                      
+                      // Se ci sono file trasformati, mostra anche il dialogo di stato Dataplex
+                      List<String> transformedFiles = _filesToProcess
+                          .where((file) => file['status'] == 'success' && file['silver_path'] != null)
+                          .map((file) => file['silver_path'] as String)
+                          .toList();
+                      
+                      if (transformedFiles.isNotEmpty) {
+                        _showDataplexStatusDialog(transformedFiles);
+                      }
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+  
   // --- Intelligent File Upload Methods ---
 
   Future<void> _pickFile(StateSetter dialogSetState) async {
@@ -1222,5 +1696,102 @@ class _SearchPageState extends State<SearchPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _processRemainingFilesInBackground(
+    DataOrchestrationService service,
+    List<Map<String, dynamic>> remainingFiles,
+    List<String> alreadyProcessedUris
+  ) async {
+    // Elabora il resto dei file in background
+    List<String> additionalUris = [];
+    
+    for (var fileInfo in remainingFiles) {
+      try {
+        // Aggiorna lo stato di elaborazione nell'interfaccia utente
+        if (mounted) {
+          setState(() {
+            int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
+            if (index >= 0) {
+              _filesToProcess[index]['status'] = 'processing';
+            }
+          });
+        }
+        
+        final result = await service.transformBronzeToSilver(
+          fileInfo['path'],
+          skipDataplex: true
+        );
+        
+        if (result != null && 
+            result['status'] == 'success' && 
+            result['silver_path'] != null) {
+          additionalUris.add(result['silver_path']);
+          
+          // Aggiorna lo stato a successo nell'interfaccia utente
+          if (mounted) {
+            setState(() {
+              int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
+              if (index >= 0) {
+                _filesToProcess[index]['status'] = 'success';
+                _filesToProcess[index]['message'] = 'Elaborazione completata in background';
+                _filesToProcess[index]['silver_path'] = result['silver_path'];
+              }
+            });
+          }
+        } else {
+          // Aggiorna lo stato a errore nell'interfaccia utente
+          if (mounted) {
+            setState(() {
+              int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
+              if (index >= 0) {
+                _filesToProcess[index]['status'] = 'error';
+                _filesToProcess[index]['message'] = result?['error'] ?? 'Errore sconosciuto';
+              }
+            });
+          }
+        }
+      } catch (e) {
+        print('Error processing file in background: $e');
+        // Aggiorna lo stato a errore nell'interfaccia utente
+        if (mounted) {
+          setState(() {
+            int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
+            if (index >= 0) {
+              _filesToProcess[index]['status'] = 'error';
+              _filesToProcess[index]['message'] = e.toString();
+            }
+          });
+        }
+      }
+    }
+    
+    // Se sono stati elaborati file aggiuntivi, avvia una scansione Dataplex per tutti
+    if (additionalUris.isNotEmpty) {
+      List<String> allUris = [...alreadyProcessedUris, ...additionalUris];
+      try {
+        if (mounted) {
+          setState(() {
+            _dataplexScanInProgress = true;
+          });
+        }
+        
+        await service.triggerBatchDataplexScan(allUris);
+        
+        if (mounted) {
+          setState(() {
+            _dataplexScanInProgress = false;
+            _showDataplexStatusDialog(allUris);
+          });
+        }
+      } catch (e) {
+        print('Error triggering batch Dataplex scan in background: $e');
+        if (mounted) {
+          setState(() {
+            _dataplexScanInProgress = false;
+          });
+        }
+      }
+    }
   }
 }

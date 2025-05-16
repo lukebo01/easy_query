@@ -4,11 +4,18 @@ import 'package:easy_query/services/rest_service.dart';
 class GeminiFlashService {
   final RestService restService;
   final String apiKey;
+  // Proprietà per memorizzare l'ultima analisi di contesto
+  Map<String, dynamic>? _lastContextAnalysis;
 
   GeminiFlashService({
     required this.restService,
     required this.apiKey,
   });
+
+  // Metodo per accedere all'ultima analisi di contesto
+  Map<String, dynamic>? getLastContextAnalysis() {
+    return _lastContextAnalysis;
+  }
 
   Future<String> generateText(String prompt) async {
     final payload = {
@@ -122,6 +129,9 @@ class GeminiFlashService {
     
     final jsonStr = text.substring(jsonStartIndex, jsonEndIndex);
     final contextAnalysis = json.decode(jsonStr);
+    
+    // Memorizza l'ultima analisi per uso futuro
+    _lastContextAnalysis = contextAnalysis as Map<String, dynamic>;
     
     return contextAnalysis as Map<String, dynamic>;
   }

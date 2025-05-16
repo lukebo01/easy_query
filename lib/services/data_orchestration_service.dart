@@ -15,6 +15,8 @@ class DataOrchestrationService {
   // URL delle Cloud Functions
   final String _bronzeToSilverUrl;
   final String _silverToGoldUrl;
+  // Nuovo URL per la scansione Dataplex batch
+  final String _batchDataplexScanUrl;
   
   DataOrchestrationService({
     required GeminiFlashService geminiService,
@@ -22,21 +24,25 @@ class DataOrchestrationService {
     required CloudStorageService cloudStorageService,
     required String bronzeToSilverUrl,
     required String silverToGoldUrl,
+    String? batchDataplexScanUrl,
   }) : 
     _geminiService = geminiService,
     _bigQueryService = bigQueryService,
     _cloudStorageService = cloudStorageService,
     _bronzeToSilverUrl = bronzeToSilverUrl,
-    _silverToGoldUrl = silverToGoldUrl;
+    _silverToGoldUrl = silverToGoldUrl,
+    _batchDataplexScanUrl = batchDataplexScanUrl ?? 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/batch-dataplex-scan';
   
   /// Analizza la query utente e decide se è necessario eseguire trasformazioni
- Future<Map<String, dynamic>> analyzeQueryAndPrepareData(
+  /// skipDataplex: se true, salta la scansione Dataplex per ogni file e ne richiede una collettiva alla fine
+  Future<Map<String, dynamic>> analyzeQueryAndPrepareData(
     String userQuestion,
-    List<Map<String, dynamic>> initialSchemas, // Schemi delle tabelle BQ esistenti
-    List<String> initialTableNames, // Nomi completi delle tabelle BQ esistenti
-    Map<String, List<Map<String, dynamic>>> initialSampleData, // Dati campione per tabelle BQ
-    List<Map<String, dynamic>> bronzeMetadata, // Metadati dei file nel bucket Bronze
-  ) async {
+    List<Map<String, dynamic>> initialSchemas,
+    List<String> initialTableNames,
+    Map<String, List<Map<String, dynamic>>> initialSampleData,
+    List<Map<String, dynamic>> bronzeMetadata, {
+    bool skipDataplex = true, // Default a true per il nuovo comportamento
+  }) async {
     dev.log("Starting data orchestration for user question: \"$userQuestion\"");
 
     try {
@@ -61,11 +67,11 @@ class DataOrchestrationService {
       final List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
 
       if (filesToTransformBronze.isNotEmpty) {
-        dev.log("Gemini suggested files for Bronze-to-Silver transformation: $filesToTransformBronze");
+        dev.log("Gemini suggested ${filesToTransformBronze.length} files for Bronze-to-Silver transformation");
 
         for (String bronzeFileGcsUri in filesToTransformBronze) {
           dev.log("Processing Bronze file for Silver transformation: $bronzeFileGcsUri");
-          final silverTransformResult = await _transformBronzeToSilver(bronzeFileGcsUri);
+          final silverTransformResult = await transformBronzeToSilver(bronzeFileGcsUri, skipDataplex: skipDataplex);
 
           if (silverTransformResult != null && silverTransformResult['status'] == 'success') {
             final String? silverPathUri = silverTransformResult['silver_path'] as String?;
@@ -161,101 +167,30 @@ class DataOrchestrationService {
             dev.log('Warning: Bronze-to-Silver transformation failed or status was not "success" for $bronzeFileGcsUri. Result: $silverTransformResult', level: 900);
           }
         }
+        
+        // Se ci sono file trasformati e stiamo usando il nuovo metodo asincrono, 
+        // avvia una singola scansione Dataplex per tutti i file
+        if (skipDataplex && transformedSilverFileUris.isNotEmpty) {
+          dev.log("Triggering batch Dataplex scan for ${transformedSilverFileUris.length} Silver files");
+          final dataplexResult = await triggerBatchDataplexScan(transformedSilverFileUris);
+          
+          if (dataplexResult != null) {
+            dev.log("Batch Dataplex scan triggered: ${jsonEncode(dataplexResult)}");
+            // Non attendiamo il completamento qui - sarà asincrono
+          } else {
+            dev.log("Failed to trigger batch Dataplex scan. Tables may not be immediately available.", level: 900);
+          }
+        }
       } else {
         dev.log("No Bronze files suggested for transformation by Gemini.");
       }
-
-      /*
-      // 3. Analizza se è necessaria un'ottimizzazione Silver → Gold (opzionale)
-      if (transformedSilverFileUris.isNotEmpty) {
-        dev.log("Analyzing if Gold optimization is needed for Silver files/tables: $transformedSilverFileUris");
-        final optimizationNeeded = await _shouldOptimizeForGold(
-          userQuestion,
-          transformedSilverFileUris,
-          finalTableNames,
-          finalSchemas
-        );
-
-        if (optimizationNeeded['optimize'] == true) {
-          dev.log("Gold optimization recommended: ${optimizationNeeded['reason']}");
-
-          final goldResult = await _transformSilverToGold(
-            transformedSilverFileUris,
-            optimizationNeeded['optimization_type'] as String? ?? 'default_optimization',
-            optimizationNeeded['params'] as Map<String, dynamic>? ?? {},
-            optimizationNeeded['output_name'] as String? ?? 'optimized_gold_table'
-          );
-
-          if (goldResult != null && goldResult['status'] == 'success') {
-            dev.log("Gold optimization completed. Output path: ${goldResult['gold_output_gcs_uri']}, BigQuery table: ${goldResult['gold_bigquery_table']}");
-
-            final String? goldBqTableFullName = goldResult['gold_bigquery_table'] as String?;
-            if (goldBqTableFullName != null && goldBqTableFullName.isNotEmpty) {
-              if (!finalTableNames.contains(goldBqTableFullName)) {
-                finalTableNames.add(goldBqTableFullName);
-              }
-
-              // Aggiungi/Aggiorna schema della tabella Gold
-              if (goldResult['gold_df_columns'] != null && goldResult['gold_df_columns'] is List) {
-                // La CF silver-to-gold ora dovrebbe restituire "gold_df_columns" come List<Map{"name": "col", "type": "BQ_TYPE"}>
-                final List<dynamic> goldColumnsRaw = goldResult['gold_df_columns'] as List<dynamic>;
-
-                // *** INIZIO MODIFICA: Gestione schemaFields con tipi per Gold ***
-                final List<Map<String, String>> goldSchemaFields = goldColumnsRaw.map((colInfoRaw) {
-                  final Map<String, dynamic> colInfo = colInfoRaw as Map<String, dynamic>; // colInfo è Map<String, dynamic>
-                  final String columnName = colInfo['name'] as String;
-                  final String columnType = colInfo['type'] as String; // Tipo BQ da CF Python
-                  return {
-                    "name": columnName,
-                    "type": columnType,
-                    "mode": "NULLABLE"
-                  };
-                }).toList();
-                // *** FINE MODIFICA ***
-
-                if (goldSchemaFields.isNotEmpty) {
-                   final goldTableParts = goldBqTableFullName.split('.');
-                   final String goldProjectId = goldTableParts.length > 2 ? goldTableParts[0] : _bigQueryService.projectId;
-                   final String goldDatasetId = goldTableParts.length > 2 ? goldTableParts[1] : "gold_layer_dataset";
-                   final String goldTableId = goldTableParts.last;
-
-                  finalSchemas.removeWhere((schema) =>
-                      schema['tableReference']?['tableId'] == goldTableId &&
-                      schema['tableReference']?['datasetId'] == goldDatasetId);
-
-                  finalSchemas.add({
-                    "tableReference": {
-                      "projectId": goldProjectId,
-                      "datasetId": goldDatasetId,
-                      "tableId": goldTableId
-                    },
-                    "schema": { // Struttura corretta per schema BQ
-                      "fields": goldSchemaFields
-                    }
-                  });
-                  dev.log("Added/Updated schema for Gold table: $goldBqTableFullName based on types from CF.");
-                }
-              } else {
-                 dev.log("Info: Gold transformation response for $goldBqTableFullName did not contain 'gold_df_columns' or it was not a list. Schema not added/updated for this run.");
-              }
-            }
-          } else {
-            dev.log("Gold optimization step was recommended but failed or did not return success. Result: $goldResult", level: 900);
-          }
-        } else {
-          dev.log("No Gold optimization needed or suggested for this query.");
-        }
-      }*/
-
-      dev.log("Data orchestration complete. Returning updated context.");
-      dev.log("Final Schemas Count: ${finalSchemas.length}");
-      dev.log("Final Table Names: $finalTableNames");
 
       return {
         'contextAnalysis': contextAnalysis,
         'updatedSchemas': finalSchemas,
         'updatedTableNames': finalTableNames,
-        'transformedSilverFileUris': transformedSilverFileUris
+        'transformedSilverFileUris': transformedSilverFileUris,
+        'dataplexWasSkipped': skipDataplex && transformedSilverFileUris.isNotEmpty,
       };
 
     } catch (e, stackTrace) {
@@ -264,11 +199,86 @@ class DataOrchestrationService {
         'contextAnalysis': {'error': 'Orchestration failed: $e'},
         'updatedSchemas': initialSchemas,
         'updatedTableNames': initialTableNames,
-        'transformedSilverFileUris': <String>[]
+        'transformedSilverFileUris': <String>[],
+        'dataplexWasSkipped': false
       };
     }
   }
   
+  /// Trasforma un file Bronze in un file Silver
+  Future<Map<String, dynamic>?> transformBronzeToSilver(
+    String bronzeFileGcsUri, {
+    bool skipDataplex = true
+  }) async {
+    try {
+      dev.log("Attempting Bronze to Silver transformation for input GCS URI: \"$bronzeFileGcsUri\"");
+      
+      final requestBody = {
+        "path": bronzeFileGcsUri,
+        "skip_dataplex": skipDataplex // Passa il flag alla Cloud Function
+      };
+      
+      // Utilizza un client HTTP con timeout aumentato
+      final client = http.Client();
+      final request = http.Request('POST', Uri.parse(_bronzeToSilverUrl));
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode(requestBody);
+      
+      final response = await client.send(request).timeout(
+        const Duration(seconds: 600),
+        onTimeout: () {
+          dev.log("Timeout during Bronze to Silver transformation for $bronzeFileGcsUri.", level: 900);
+          throw TimeoutException('Request timed out after 10 minutes');
+        },
+      );
+      
+      final responseBody = await response.stream.bytesToString();
+      client.close();
+      
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final result = jsonDecode(responseBody) as Map<String, dynamic>;
+        return result;
+      } else {
+        dev.log("Bronze to Silver transformation failed with status ${response.statusCode}: $responseBody", level: 900);
+        return {"status": "error", "error": "HTTP Error ${response.statusCode}: $responseBody"};
+      }
+    } catch (e) {
+      dev.log("Exception calling Bronze to Silver function: $e", error: e);
+      return {"status": "error", "error": e.toString()};
+    }
+  }
+  
+  /// Avvia una scansione Dataplex batch per tutti i file Silver generati
+  Future<Map<String, dynamic>?> triggerBatchDataplexScan(List<String> silverFileUris) async {
+    try {
+      dev.log("Triggering batch Dataplex scan for ${silverFileUris.length} files");
+      
+      final requestBody = {
+        "silver_files": silverFileUris
+      };
+      
+      final response = await http.post(
+        Uri.parse(_batchDataplexScanUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(requestBody),
+      );
+      
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final result = jsonDecode(response.body) as Map<String, dynamic>;
+        return result;
+      } else if (response.statusCode == 429) {
+        dev.log("Dataplex API quota exceeded. Tables will be created when quota resets.", level: 500);
+        return {"status": "quota_exceeded", "message": "Dataplex quota exceeded. Tables will be created later."};
+      } else {
+        dev.log("Batch Dataplex scan failed with status ${response.statusCode}: ${response.body}", level: 900);
+        return {"status": "error", "error": "HTTP Error ${response.statusCode}: ${response.body}"};
+      }
+    } catch (e) {
+      dev.log("Exception calling Batch Dataplex scan function: $e", error: e);
+      return {"status": "error", "error": e.toString()};
+    }
+  }
+
   /// Chiede al LLM se è necessario ottimizzare in Gold
   
   Future<Map<String, dynamic>> _shouldOptimizeForGold(
@@ -330,43 +340,6 @@ class DataOrchestrationService {
     }
   }
 
-  /// Trasforma un file Bronze in un file Silver
-  Future<Map<String, dynamic>?> _transformBronzeToSilver(String bronzeFileGcsUri) async {
-    try {
-      dev.log("Attempting Bronze to Silver transformation for input GCS URI: \"$bronzeFileGcsUri\"");
-      
-      final requestBody = {"path": bronzeFileGcsUri};
-      
-      // Utilizza un client HTTP con timeout aumentato
-      final client = http.Client();
-      final request = http.Request('POST', Uri.parse(_bronzeToSilverUrl));
-      request.headers['Content-Type'] = 'application/json';
-      request.body = jsonEncode(requestBody);
-      
-      // Aumenta il timeout a 300 secondi (5 minuti)
-      final response = await client.send(request).timeout(
-        const Duration(seconds: 600), // Aumentato da 60 secondi (default) a 300 secondi
-        onTimeout: () {
-          dev.log("Timeout during Bronze to Silver transformation for $bronzeFileGcsUri.", level: 900);
-          throw TimeoutException('Request timed out after 10 minutes');
-        },
-      );
-      
-      final responseBody = await response.stream.bytesToString();
-      client.close();
-      
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        final result = jsonDecode(responseBody) as Map<String, dynamic>;
-        return result;
-      } else {
-        dev.log("Bronze to Silver transformation failed with status ${response.statusCode}: $responseBody", level: 900);
-        return {"status": "error", "error": "HTTP Error ${response.statusCode}: $responseBody"};
-      }
-    } catch (e) {
-      dev.log("Exception calling Bronze to Silver function: $e", error: e);
-      return {"status": "error", "error": e.toString()};
-    }
-  }
 
   Future<Map<String, dynamic>?> _transformSilverToGold(
     List<String> silverFiles,

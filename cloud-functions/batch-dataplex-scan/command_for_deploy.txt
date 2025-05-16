@@ -1,0 +1,13 @@
+gcloud functions deploy batch-dataplex-scan \
+    --runtime python311 \
+    --trigger-http \
+    --allow-unauthenticated \
+    --entry-point batch_dataplex_scan \
+    --source ./cloud-functions/batch-dataplex-scan/ \
+    --region europe-central2 \
+    --project soy-transducer-456512-t0 \
+    --service-account gcf-metadata-ingestor@soy-transducer-456512-t0.iam.gserviceaccount.com \
+    --set-env-vars GCP_PROJECT=soy-transducer-456512-t0 \
+    --timeout 540s \
+    --memory 512MB \
+    --gen2

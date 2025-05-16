@@ -1,0 +1,6 @@
+# Per Windows (PowerShell)
+gcloud run services add-iam-policy-binding batch-dataplex-scan `
+    --member="allUsers" `
+    --role="roles/run.invoker" `
+    --region=europe-central2 `
+    --project=soy-transducer-456512-t0
