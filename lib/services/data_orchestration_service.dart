@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:easy_query/services/gemini_flash_service.dart';
 import 'package:easy_query/services/big_query_service.dart';
 import 'package:easy_query/services/cloud_storage_service.dart';
+import 'dart:async';
 
 /// Servizio che orchestera le trasformazioni dei dati tramite LLM
 class DataOrchestrationService {
@@ -329,60 +330,41 @@ class DataOrchestrationService {
     }
   }
 
-  Future<Map<String, dynamic>?> _transformBronzeToSilver(String fileGcsUri) async {
-    dev.log('Attempting Bronze to Silver transformation for input GCS URI: "$fileGcsUri"');
-    String processedPath = fileGcsUri;
-    if (processedPath.startsWith('gs://')) {
-      processedPath = processedPath.substring(5);
-    } else {
-      dev.log('Warning: Input file path "$fileGcsUri" does not start with "gs://". Assuming it is already in "bucket/object" format.', level: 800);
-    }
-
-    List<String> parts = processedPath.split('/');
-    if (parts.isEmpty) {
-      dev.log('Error: Processed path "$processedPath" is empty after splitting by "/".', level: 1000, error: 'Invalid GCS path format.');
-      return null;
-    }
-
-    String bucketName = parts.first;
-    List<String> objectPathSegments = parts.sublist(1).where((segment) => segment.isNotEmpty).toList();
-    String objectPath = objectPathSegments.join('/');
-    String fullPath = '${bucketName}/${objectPath}';
-
-    final Map<String, dynamic> requestPayload = {
-      'path': fullPath,
-      'force_processing': false, // o true se necessario per debug
-    };
-
+  /// Trasforma un file Bronze in un file Silver
+  Future<Map<String, dynamic>?> _transformBronzeToSilver(String bronzeFileGcsUri) async {
     try {
-      final uri = Uri.parse(_bronzeToSilverUrl);
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(requestPayload),
+      dev.log("Attempting Bronze to Silver transformation for input GCS URI: \"$bronzeFileGcsUri\"");
+      
+      final requestBody = {"path": bronzeFileGcsUri};
+      
+      // Utilizza un client HTTP con timeout aumentato
+      final client = http.Client();
+      final request = http.Request('POST', Uri.parse(_bronzeToSilverUrl));
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode(requestBody);
+      
+      // Aumenta il timeout a 300 secondi (5 minuti)
+      final response = await client.send(request).timeout(
+        const Duration(seconds: 600), // Aumentato da 60 secondi (default) a 300 secondi
+        onTimeout: () {
+          dev.log("Timeout during Bronze to Silver transformation for $bronzeFileGcsUri.", level: 900);
+          throw TimeoutException('Request timed out after 10 minutes');
+        },
       );
-
+      
+      final responseBody = await response.stream.bytesToString();
+      client.close();
+      
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        final Map<String, dynamic> responseData = jsonDecode(response.body) as Map<String, dynamic>;
-        if (responseData['status'] == 'success') {
-          dev.log('Bronze to Silver transformation successful. Response: $responseData');
-          // La logica per creare la tabella esterna è già in analyzeQueryAndPrepareData
-          // Quindi qui restituiamo semplicemente i dati, inclusi "columns" con i tipi.
-        } else {
-          dev.log('Bronze to Silver transformation returned non-success status: ${responseData['status']}. Response: $responseData');
-        }
-        return responseData;
+        final result = jsonDecode(responseBody) as Map<String, dynamic>;
+        return result;
+      } else {
+        dev.log("Bronze to Silver transformation failed with status ${response.statusCode}: $responseBody", level: 900);
+        return {"status": "error", "error": "HTTP Error ${response.statusCode}: $responseBody"};
       }
-
-      dev.log('HTTP error calling Bronze to Silver function: ${response.statusCode} - ${response.reasonPhrase}', error: response.body, level: 900);
-      return {
-        'status': 'error',
-        'error': 'HTTP error: ${response.statusCode} - ${response.reasonPhrase}',
-        'details': response.body
-      };
-    } catch (e, stackTrace) {
-      dev.log('Exception calling Bronze to Silver function: $e', error: e, stackTrace: stackTrace, level: 1000);
-      return {'status': 'error', 'error': 'Exception: $e'};
+    } catch (e) {
+      dev.log("Exception calling Bronze to Silver function: $e", error: e);
+      return {"status": "error", "error": e.toString()};
     }
   }
 

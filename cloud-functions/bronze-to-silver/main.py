@@ -369,11 +369,86 @@ def _process_text_file(file_path):
         }])
 
 def _process_tabular_file(file_path, file_extension):
-    """Elabora un file CSV o TSV."""
-    delimiter = ',' if file_extension == "csv" else '\t'
-    df = pd.read_csv(file_path, delimiter=delimiter)
-    df["deep_processed_ok"] = True
-    return df
+    """Elabora un file CSV o TSV con gestione robusta di vari formati."""
+    
+    # Prima tenta di rilevare il delimitatore
+    import csv
+    
+    def detect_delimiter(filepath, sample_size=4096):
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            sample = f.read(sample_size)
+            
+        sniffer = csv.Sniffer()
+        try:
+            dialect = sniffer.sniff(sample)
+            return dialect.delimiter
+        except:
+            # Fallback a delimitatore standard basato su estensione
+            print(f"Could not auto-detect delimiter, using default for {file_extension}")
+            return ',' if file_extension == "csv" else '\t'
+    
+    print(f"Processing tabular file: {file_path}")
+    
+    # Serie di tentativi con configurazioni sempre più permissive
+    attempts = [
+        # Primo tentativo: auto-rilevamento delimitatore
+        lambda: pd.read_csv(file_path, delimiter=detect_delimiter(file_path)),
+        
+        # Secondo tentativo: delimitatore standard + skip bad lines
+        lambda: pd.read_csv(
+            file_path, 
+            delimiter=',' if file_extension == "csv" else '\t',
+            on_bad_lines='skip',  # Skip rows with parsing errors
+            low_memory=False  # Avoid dtype warnings/errors
+        ),
+        
+        # Terzo tentativo: più configurazioni per robustezza
+        lambda: pd.read_csv(
+            file_path,
+            delimiter=',' if file_extension == "csv" else '\t',
+            on_bad_lines='skip',
+            quoting=csv.QUOTE_NONE,  # Ignore quotes
+            low_memory=False,
+            engine='python'  # Sometimes more forgiving
+        ),
+        
+        # Quarto tentativo: metodo estremo per file molto inconsistenti
+        lambda: pd.read_csv(
+            file_path,
+            delimiter=',' if file_extension == "csv" else '\t',
+            on_bad_lines='skip',
+            quoting=csv.QUOTE_NONE,
+            escapechar='\\',
+            engine='python',
+            low_memory=False,
+            skip_blank_lines=True,
+            encoding='utf-8',
+            encoding_errors='replace'
+        )
+    ]
+    
+    errors = []
+    for i, attempt_func in enumerate(attempts):
+        try:
+            print(f"CSV parsing attempt {i+1}/{len(attempts)}...")
+            df = attempt_func()
+            if not df.empty:
+                print(f"Successfully parsed with attempt {i+1}")
+                df["deep_processed_ok"] = True
+                return df
+        except Exception as e:
+            errors.append(f"Attempt {i+1} failed: {str(e)}")
+            print(f"CSV parsing attempt {i+1} failed: {e}")
+    
+    # Se tutti i tentativi falliscono, crea un DataFrame con gli errori come informazioni
+    print(f"All CSV parsing attempts failed. Creating error DataFrame with metadata.")
+    return pd.DataFrame([{
+        "original_file_path": file_path,
+        "file_extension": file_extension,
+        "deep_processed_ok": False,
+        "processing_errors": "; ".join(errors),
+        "error_description": "Failed to parse tabular file after multiple attempts with different settings"
+    }])
 
 def _process_json_file(file_path):
     """Elabora un file JSON."""
@@ -746,15 +821,26 @@ def bronze_to_silver(request: Request):
         force_processing = data_payload.get("force_processing", False)
         custom_data_prefix_override = data_payload.get("custom_prefix", None)
 
-        if not isinstance(full_path_from_caller, str) or '/' not in full_path_from_caller:
-             return ({"status": "error", "error": "Invalid 'path' format. Expected string 'bucket_name/path/to/file'"}, 400, response_cors_headers)
+        # Handle both gs:// URI format and simple bucket/path format
+        if full_path_from_caller.startswith("gs://"):
+            # Remove 'gs://' prefix and split remaining path
+            path_without_protocol = full_path_from_caller[5:]  # Remove 'gs://'
+            parts = path_without_protocol.split('/', 1)
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                return ({"status": "error", "error": "Invalid GCS URI format. Expected 'gs://bucket_name/path/to/file'"}, 400, response_cors_headers)
+            bronze_bucket_name = parts[0]
+            blob_name_in_gcs = '/' + parts[1]  # Add leading slash for GCS operations
+        else:
+            # Original handling for bucket_name/path/to/file format
+            if not isinstance(full_path_from_caller, str) or '/' not in full_path_from_caller:
+                return ({"status": "error", "error": "Invalid 'path' format. Expected string 'bucket_name/path/to/file'"}, 400, response_cors_headers)
 
-        bronze_bucket_name, *blob_parts = full_path_from_caller.split("/", 1)
-        if not blob_parts or not blob_parts[0]:
-            return ({"status": "error", "error": "Invalid path format. File path part is missing after bucket name."}, 400, response_cors_headers)
+            bronze_bucket_name, *blob_parts = full_path_from_caller.split("/", 1)
+            if not blob_parts or not blob_parts[0]:
+                return ({"status": "error", "error": "Invalid path format. File path part is missing after bucket name."}, 400, response_cors_headers)
 
-        object_path_from_caller_no_leading_slash = blob_parts[0].lstrip('/')
-        blob_name_in_gcs = f"/{object_path_from_caller_no_leading_slash}" # Path GCS inizia con /
+            object_path_from_caller_no_leading_slash = blob_parts[0].lstrip('/')
+            blob_name_in_gcs = f"/{object_path_from_caller_no_leading_slash}"  # Path GCS inizia con /
 
         print(f"Original path from caller: '{full_path_from_caller}'")
         print(f"Derived bronze_bucket_name: '{bronze_bucket_name}'")
