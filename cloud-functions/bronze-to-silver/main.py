@@ -107,8 +107,8 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         print(f"[DATAPLEX SUCCESS] {success_msg}")
         
         # Polling loop per monitorare il completamento della discovery
-        max_wait_sec = 300  # 5 minuti
-        interval = 10       # ogni 10 secondi
+        max_wait_sec = 600  # 10 minuti
+        interval = 30       # ogni 10 secondi
         waited = 0
 
         print(f"[DATAPLEX DEBUG] Starting polling for discovery completion...")
@@ -155,7 +155,7 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
             waited += interval
 
         # Timeout but consider it a success since the schedule was updated
-        timeout_msg = "Discovery scheduled but monitoring timed out after 5 minutes"
+        timeout_msg = "Discovery scheduled but monitoring timed out after 10 minutes"
         print(f"[DATAPLEX INFO] {timeout_msg}")
         return True, {"message": timeout_msg, "state": "SCHEDULED"}
 
