@@ -105,7 +105,59 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         success_msg = (f"Discovery schedule for asset '{asset_name}' successfully updated to '{new_schedule_str}'. "
                        "Dataplex will trigger discovery based on this new schedule.")
         print(f"[DATAPLEX SUCCESS] {success_msg}")
-        return True, success_msg
+        
+        # Polling loop per monitorare il completamento della discovery
+        max_wait_sec = 300  # 5 minuti
+        interval = 10       # ogni 10 secondi
+        waited = 0
+
+        print(f"[DATAPLEX DEBUG] Starting polling for discovery completion...")
+        while waited < max_wait_sec:
+            try:
+                asset = client.get_asset(name=asset_name)
+                status = asset.discovery_status
+                
+                # Check if we have the fields we're looking for
+                if hasattr(status, 'state'):
+                    # Use the state directly if available
+                    state = status.state.name
+                    message = getattr(status, 'message', '')
+                    last_run_time = getattr(status, 'update_time', None)
+                    
+                    print(f"[{waited}s] Discovery status: {state} - {message}")
+                    
+                    if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
+                        discovery_result = {
+                            "state": state,
+                            "message": message,
+                            "last_run_time": last_run_time.isoformat() if last_run_time else None
+                        }
+                        print(f"[DATAPLEX DEBUG] Discovery completed with state: {state}")
+                        return True, {"message": success_msg, "discovery_result": discovery_result}
+                elif hasattr(status, 'stats'):
+                    # If we have stats, the discovery is likely running or completed
+                    print(f"[{waited}s] Discovery status: Running - Discovery has stats")
+                    
+                    # Just print available fields for debugging
+                    for field in dir(status):
+                        if not field.startswith('_') and not callable(getattr(status, field)):
+                            print(f"  - {field}: {getattr(status, field)}")
+                else:
+                    # We don't have enough information about the status
+                    print(f"[{waited}s] Discovery status: Unknown - Limited information available")
+                    print(f"Available fields: {dir(status)}")
+                
+            except Exception as e:
+                print(f"[DATAPLEX WARNING] Error checking discovery status: {e}")
+                traceback.print_exc()
+            
+            time.sleep(interval)
+            waited += interval
+
+        # Timeout but consider it a success since the schedule was updated
+        timeout_msg = "Discovery scheduled but monitoring timed out after 5 minutes"
+        print(f"[DATAPLEX INFO] {timeout_msg}")
+        return True, {"message": timeout_msg, "state": "SCHEDULED"}
 
     except google.api_core.exceptions.InvalidArgument as e:
         error_msg = f"InvalidArgument error updating asset '{asset_name}': {e}. This likely means the cron format ('{new_schedule_str}') is still not accepted or there's another issue with the request."
@@ -122,6 +174,18 @@ def trigger_dataplex_discovery(project_id: str, triggering_parquet_file_gcs_path
         print(f"[DATAPLEX ERROR] {error_msg}")
         traceback.print_exc()
         return False, error_msg
+    except google.api_core.exceptions.ResourceExhausted as e:
+        # Gestione specifica per errori di quota (429)
+        error_msg = f"Quota exceeded error while updating asset '{asset_name}': {e}. This is a rate limiting issue."
+        print(f"[DATAPLEX QUOTA ERROR] {error_msg}")
+        print(f"[DATAPLEX QUOTA INFO] The discovery will be attempted later automatically according to the schedule.")
+        traceback.print_exc()
+        # Ritorniamo un messaggio più informativo per l'utente
+        return False, {
+            "error_type": "quota_exceeded",
+            "message": "Dataplex API quota exceeded. Table creation will proceed when the quota resets.",
+            "details": str(e)
+        }
     except TimeoutError:
         error_msg = f"Timeout waiting for UpdateAsset operation on '{asset_name}' to complete. The update might still be in progress or may have failed."
         print(f"[DATAPLEX WARNING] {error_msg}")
@@ -151,9 +215,9 @@ def determine_silver_path_components(file_path_in_bronze: str, file_extension: s
         "it": ["it", "technology", "system", "software", "hardware", "tech", "dev"] # Aggiunto dev
     }
 
-    lower_file_path_in_bronze = file_path_in_bronze.lower()
+    lower_file_in_bronze = file_path_in_bronze.lower()
     for domain, patterns in domain_patterns.items():
-        if any(pattern in lower_file_path_in_bronze for pattern in patterns):
+        if any(pattern in lower_file_in_bronze for pattern in patterns):
             data_domain = domain
             break
 
@@ -811,8 +875,15 @@ def bronze_to_silver(request: Request):
                     discovered_entity_id = result_data.get("entity_id") # Ottieni l'entity_id
                     print(f"Trigger Dataplex per '{uri_parquet_in_silver}' completato: {dataplex_info}")
                 else: # Fallimento o formato risposta inatteso
-                    dataplex_info = result_data if isinstance(result_data, str) else "Fallimento con formato risposta inatteso."
-                    print(f"Avviso: Trigger Dataplex per '{uri_parquet_in_silver}' fallito: {dataplex_info}")
+                    # Check if it's a quota exceeded error specifically
+                    is_quota_error = isinstance(result_data, dict) and result_data.get("error_type") == "quota_exceeded"
+                    
+                    if is_quota_error:
+                        dataplex_info = result_data.get("message", "Dataplex API quota exceeded")
+                        print(f"[QUOTA WARNING] Trigger Dataplex per '{uri_parquet_in_silver}' ha raggiunto il limite di quota: {dataplex_info}")
+                    else:
+                        dataplex_info = result_data if isinstance(result_data, str) else "Fallimento con formato risposta inatteso."
+                        print(f"Avviso: Trigger Dataplex per '{uri_parquet_in_silver}' fallito: {dataplex_info}")
             
             except Exception as e_dataplex:
                 dataplex_success = False
@@ -842,6 +913,12 @@ def bronze_to_silver(request: Request):
                 "dataplex_info": dataplex_info,
                 "note": "BigQuery table will be created automatically by Dataplex discovery process"
             }
+            
+            # Add quota warning if applicable
+            if isinstance(result_data, dict) and result_data.get("error_type") == "quota_exceeded":
+                response_data["dataplex_status"] = "quota_exceeded"
+                response_data["note"] = "File uploaded successfully. BigQuery table will be created when the Dataplex quota resets (typically within a few minutes)."
+                
             return (response_data, 200, response_cors_headers)
         
         else:
