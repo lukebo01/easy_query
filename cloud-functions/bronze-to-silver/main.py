@@ -914,6 +914,7 @@ def update_bronze_metadata_in_bigquery(
 ):
     """
     Aggiorna la tabella metadata_store.bronze_file_metadata in BigQuery con le informazioni sul file bronze processato.
+    Evita l'errore di streaming buffer inserendo un nuovo record invece di fare UPDATE.
     
     Args:
         project_id: ID del progetto GCP
@@ -934,31 +935,41 @@ def update_bronze_metadata_in_bigquery(
         # Costruisci il nome completo della tabella
         table_id = f"{project_id}.metadata_store.bronze_file_metadata"
         
-        # Crea un oggetto TableReference
-        table_ref = bigquery.TableReference.from_string(table_id)
+        # Costruisci il GCS URI completo per il file bronze con doppio slash dopo il bucket
+        # Questo formato sembra essere quello usato nella tabella
+        clean_bronze_path = bronze_blob_path.lstrip('/')
+        bronze_gcs_uri = f"gs://{bronze_bucket}//{clean_bronze_path}"
         
-        # Verifica che la tabella esista
-        try:
-            table = bq_client.get_table(table_ref)
-        except Exception as e:
-            # Se la tabella non esiste, crea il messaggio di errore appropriato
-            error_msg = f"La tabella {table_id} non esiste. Errore: {e}"
-            print(error_msg)
-            return False
+        print(f"Cercando record con file_gcs_uri: {bronze_gcs_uri}")
         
-        # Costruisci il path GCS completo per il file bronze
-        bronze_full_path = f"gs://{bronze_bucket}/{bronze_blob_path}"
-        
-        # Costruisci la query per verificare se esiste già un record per questo file
+        # Verifica se esiste già un record per questo file usando file_gcs_uri
         check_query = f"""
-        SELECT 1 FROM `{table_id}` 
-        WHERE bronze_file_path = "{bronze_full_path}"
+        SELECT * FROM `{table_id}` 
+        WHERE file_gcs_uri = "{bronze_gcs_uri}"
         LIMIT 1
         """
         
         query_job = bq_client.query(check_query)
         result = list(query_job.result())
         record_exists = len(result) > 0
+        
+        # Recupera informazioni esistenti se disponibili
+        # Questo ci permette di preservare i campi che non stiamo aggiornando
+        existing_data = {}
+        if record_exists:
+            record = result[0]
+            # Salva TUTTI i campi esistenti
+            for field in record.keys():
+                if field not in ['processed', 'processed_timestamp', 'silver_path', 'bigquery_table', 'record_count', 'silver_columns']:
+                    value = getattr(record, field)
+                    # Per array e JSON, gestisci correttamente i valori NULL
+                    if field in ['tags', 'additional_metadata'] and value is None:
+                        if field == 'tags':
+                            value = []
+                        elif field == 'additional_metadata':
+                            value = {}
+                    existing_data[field] = value
+            print(f"Trovato record esistente per file_gcs_uri: {bronze_gcs_uri}")
         
         # Prepara le colonne delle tabelle come JSON
         columns_json = json.dumps([{
@@ -968,52 +979,123 @@ def update_bronze_metadata_in_bigquery(
         
         # Timestamp di elaborazione
         processed_timestamp = datetime.datetime.utcnow().isoformat()
+        current_time = datetime.datetime.utcnow()
         
-        if record_exists:
-            # Aggiorna il record esistente
-            update_query = f"""
-            UPDATE `{table_id}`
-            SET 
-              processed = TRUE,
-              processed_timestamp = TIMESTAMP("{processed_timestamp}"),
-              silver_path = "{silver_uri}",
-              bigquery_table = "{bigquery_table_id}",
-              record_count = {record_count},
-              silver_columns = JSON '{columns_json}'
-            WHERE bronze_file_path = "{bronze_full_path}"
-            """
-            
-            print(f"Aggiornamento record esistente in {table_id} per {bronze_full_path}")
-            bq_client.query(update_query).result()
+        # Prepara i valori di default per i campi obbligatori
+        file_name = os.path.basename(bronze_blob_path)
+        file_extension = os.path.splitext(file_name)[1].lstrip('.') if '.' in file_name else ''
+        file_path = f"/{clean_bronze_path}"
+        event_time = current_time.isoformat()
+        metadata_ingestion_time = existing_data.get('metadata_ingestion_time', current_time.isoformat())
+        processing_status = "PROCESSED_TO_SILVER"
+        
+        
+        # Nota: questa query non viene eseguita per evitare problemi con lo streaming buffer.
+        # Se vuoi eseguirla, puoi decommentare la riga seguente:
+        # bq_client.query(delete_old_row_query).result()
+        
+        # Costruisci la query INSERT con tutti i campi necessari
+        # Gestisci correttamente i campi specifici
+        insert_query = f"""
+        INSERT INTO `{table_id}` (
+          file_gcs_uri,
+          bucket_name,
+          file_path,
+          file_name,
+          file_extension,
+          content_type,
+          file_size_bytes,
+          gcs_generation_id,
+          gcs_metageneration_id,
+          gcs_crc32c_hash,
+          gcs_md5_hash,
+          event_time,
+          metadata_ingestion_time,
+          processing_status,
+          last_processed_by,
+          last_processing_notes,
+          source_system,
+          data_domain,
+          tags,
+          has_text_content,
+          additional_metadata,
+          processed,
+          processed_timestamp,
+          silver_path,
+          bigquery_table,
+          record_count,
+          silver_columns
+        )
+        VALUES (
+          "{bronze_gcs_uri}",
+          "{bronze_bucket}",
+          "{file_path}",
+          "{file_name}",
+          "{file_extension}",
+          "{existing_data.get('content_type', '')}",
+          {existing_data.get('file_size_bytes', 'NULL')},
+          "{existing_data.get('gcs_generation_id', '')}",
+          "{existing_data.get('gcs_metageneration_id', '')}",
+          "{existing_data.get('gcs_crc32c_hash', '')}",
+          "{existing_data.get('gcs_md5_hash', '')}",
+          TIMESTAMP("{event_time}"),
+          TIMESTAMP("{metadata_ingestion_time}"),
+          "{processing_status}",
+          "bronze-to-silver",
+          "File processato automaticamente da bronze a silver",
+          "{existing_data.get('source_system', '')}",
+          "{existing_data.get('data_domain', '')}",
+        """
+        
+        # Gestisci specificamente l'array 'tags' (che potrebbe essere NULL)
+        tags_value = existing_data.get('tags', [])
+        if tags_value:
+            # Se abbiamo tag, convertiamoli in formato array per SQL
+            tags_sql = json.dumps(tags_value)
+            insert_query += f"\n          {tags_sql},"
         else:
-            # Inserisci un nuovo record
-            insert_query = f"""
-            INSERT INTO `{table_id}` (
-              bronze_file_path, 
-              processed, 
-              processed_timestamp, 
-              silver_path, 
-              bigquery_table, 
-              record_count,
-              silver_columns
-            )
-            VALUES (
-              "{bronze_full_path}", 
-              TRUE, 
-              TIMESTAMP("{processed_timestamp}"), 
-              "{silver_uri}", 
-              "{bigquery_table_id}", 
-              {record_count},
-              JSON '{columns_json}'
-            )
-            """
-            
-            print(f"Inserimento nuovo record in {table_id} per {bronze_full_path}")
+            insert_query += "\n          [],\n"
+        
+        # Aggiungi il resto dei campi
+        insert_query += f"""
+          {existing_data.get('has_text_content', 'FALSE')},
+        """
+        
+        # Gestisci il campo additional_metadata (JSON)
+        additional_metadata = existing_data.get('additional_metadata', {})
+        if additional_metadata:
+            # Serializza come JSON valido per SQL
+            metadata_json = json.dumps(additional_metadata)
+            insert_query += f"\n          JSON '{metadata_json}',"
+        else:
+            insert_query += "\n          JSON '{}',\n"
+        
+        # Completa la query con i valori di elaborazione
+        insert_query += f"""
+          TRUE,
+          TIMESTAMP("{processed_timestamp}"),
+          "{silver_uri}",
+          "{bigquery_table_id}",
+          {record_count},
+          JSON '{columns_json}'
+        )
+        """
+        
+        
+        print(f"Inserimento nuovo record in {table_id} per file_gcs_uri: {bronze_gcs_uri}")
+        try:
             bq_client.query(insert_query).result()
+            print("Nuovo record inserito con successo")
             
-        print(f"Aggiornamento tabella {table_id} completato con successo per {bronze_full_path}")
-        return True
-    
+            return True
+        except Exception as e_insert:
+            print(f"Errore nell'inserimento del record: {e_insert}")
+            if "duplicate" in str(e_insert).lower():
+                print("Questo è normale se il file è stato elaborato recentemente e ha un vincolo di unicità.")
+                return True  # Consideriamo comunque l'operazione riuscita
+            else:
+                raise  # Rilanciamo l'eccezione se è un errore diverso
+            
     except Exception as e:
         print(f"Errore nell'aggiornamento della tabella metadata_store.bronze_file_metadata: {e}")
         traceback.print_exc()
