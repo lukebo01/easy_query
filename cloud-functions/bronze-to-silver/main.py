@@ -20,6 +20,8 @@ import re # Per estrarre l'entity_id dal messaggio di successo
 from google.cloud import dataplex_v1
 import google.api_core.exceptions
 from google.protobuf import field_mask_pb2
+# Aggiungiamo l'import di BigQuery
+from google.cloud import bigquery
 
 
 
@@ -842,6 +844,181 @@ def calculate_bigquery_table_id(project_id, path_components, root_prefix):
     # Il nome completo della tabella BigQuery che Dataplex creerà
     return f"{project_id}.silver_zone.{dataplex_table_id}"
 
+# --- NUOVA FUNZIONE PER AGGIORNARE I METADATI DEL FILE BRONZE ---
+def update_bronze_file_metadata(
+    bronze_bucket,
+    bronze_blob_path,
+    silver_uri,
+    bigquery_table_id,
+    record_count,
+    columns_info
+):
+    """
+    Aggiorna i metadati del file bronze originale per indicare che è stato processato
+    e dove si trovano i dati elaborati in silver.
+    
+    Args:
+        bronze_bucket: Bucket GCS del file bronze
+        bronze_blob_path: Path del blob nel bucket bronze
+        silver_uri: URI completo del file silver corrispondente
+        bigquery_table_id: ID della tabella BigQuery che conterrà i dati
+        record_count: Numero di record elaborati
+        columns_info: Informazioni sulle colonne elaborate
+    """
+    try:
+        # Ottieni il blob
+        bronze_bucket_obj = storage_client.bucket(bronze_bucket)
+        bronze_blob_obj = bronze_bucket_obj.get_blob(bronze_blob_path)
+        
+        if not bronze_blob_obj:
+            print(f"WARNING: Blob {bronze_blob_path} non trovato in bucket {bronze_bucket} per aggiornamento metadati.")
+            return False
+        
+        # Ottieni i metadati esistenti o inizializza un nuovo dict
+        existing_metadata = bronze_blob_obj.metadata or {}
+        
+        # Aggiorna i metadati con le informazioni di elaborazione
+        processing_metadata = {
+            "processed": "true",
+            "processed_timestamp": datetime.datetime.utcnow().isoformat(),
+            "silver_path": silver_uri,
+            "bigquery_table": bigquery_table_id,
+            "record_count": str(record_count),  # Converti a string perché i metadati GCS richiedono stringhe
+            "silver_columns_count": str(len(columns_info)) if columns_info else "0"
+        }
+        
+        # Mantieni i metadati esistenti ma aggiorna/aggiungi quelli nuovi
+        existing_metadata.update(processing_metadata)
+        
+        # Aggiorna i metadati del blob
+        bronze_blob_obj.metadata = existing_metadata
+        bronze_blob_obj.patch()
+        
+        print(f"Metadati del file bronze {bronze_blob_path} aggiornati con successo. Stato: processato.")
+        return True
+    
+    except Exception as e:
+        print(f"Errore nell'aggiornamento metadati del file bronze {bronze_blob_path}: {e}")
+        traceback.print_exc()
+        return False
+
+# --- NUOVA FUNZIONE PER AGGIORNARE LA TABELLA METADATA_STORE.BRONZE_FILE_METADATA IN BQ ---
+def update_bronze_metadata_in_bigquery(
+    project_id,
+    bronze_bucket,
+    bronze_blob_path,
+    silver_uri,
+    bigquery_table_id,
+    record_count,
+    columns_info
+):
+    """
+    Aggiorna la tabella metadata_store.bronze_file_metadata in BigQuery con le informazioni sul file bronze processato.
+    
+    Args:
+        project_id: ID del progetto GCP
+        bronze_bucket: Bucket GCS del file bronze
+        bronze_blob_path: Path del blob nel bucket bronze
+        silver_uri: URI completo del file silver corrispondente
+        bigquery_table_id: ID della tabella BigQuery che conterrà i dati
+        record_count: Numero di record elaborati
+        columns_info: Informazioni sulle colonne elaborate
+    
+    Returns:
+        bool: True se l'operazione è andata a buon fine, False altrimenti
+    """
+    try:
+        # Inizializza il client BigQuery
+        bq_client = bigquery.Client(project=project_id)
+        
+        # Costruisci il nome completo della tabella
+        table_id = f"{project_id}.metadata_store.bronze_file_metadata"
+        
+        # Crea un oggetto TableReference
+        table_ref = bigquery.TableReference.from_string(table_id)
+        
+        # Verifica che la tabella esista
+        try:
+            table = bq_client.get_table(table_ref)
+        except Exception as e:
+            # Se la tabella non esiste, crea il messaggio di errore appropriato
+            error_msg = f"La tabella {table_id} non esiste. Errore: {e}"
+            print(error_msg)
+            return False
+        
+        # Costruisci il path GCS completo per il file bronze
+        bronze_full_path = f"gs://{bronze_bucket}/{bronze_blob_path}"
+        
+        # Costruisci la query per verificare se esiste già un record per questo file
+        check_query = f"""
+        SELECT 1 FROM `{table_id}` 
+        WHERE bronze_file_path = "{bronze_full_path}"
+        LIMIT 1
+        """
+        
+        query_job = bq_client.query(check_query)
+        result = list(query_job.result())
+        record_exists = len(result) > 0
+        
+        # Prepara le colonne delle tabelle come JSON
+        columns_json = json.dumps([{
+            "name": col["name"],
+            "type": col["type"]
+        } for col in columns_info])
+        
+        # Timestamp di elaborazione
+        processed_timestamp = datetime.datetime.utcnow().isoformat()
+        
+        if record_exists:
+            # Aggiorna il record esistente
+            update_query = f"""
+            UPDATE `{table_id}`
+            SET 
+              processed = TRUE,
+              processed_timestamp = TIMESTAMP("{processed_timestamp}"),
+              silver_path = "{silver_uri}",
+              bigquery_table = "{bigquery_table_id}",
+              record_count = {record_count},
+              silver_columns = JSON '{columns_json}'
+            WHERE bronze_file_path = "{bronze_full_path}"
+            """
+            
+            print(f"Aggiornamento record esistente in {table_id} per {bronze_full_path}")
+            bq_client.query(update_query).result()
+        else:
+            # Inserisci un nuovo record
+            insert_query = f"""
+            INSERT INTO `{table_id}` (
+              bronze_file_path, 
+              processed, 
+              processed_timestamp, 
+              silver_path, 
+              bigquery_table, 
+              record_count,
+              silver_columns
+            )
+            VALUES (
+              "{bronze_full_path}", 
+              TRUE, 
+              TIMESTAMP("{processed_timestamp}"), 
+              "{silver_uri}", 
+              "{bigquery_table_id}", 
+              {record_count},
+              JSON '{columns_json}'
+            )
+            """
+            
+            print(f"Inserimento nuovo record in {table_id} per {bronze_full_path}")
+            bq_client.query(insert_query).result()
+            
+        print(f"Aggiornamento tabella {table_id} completato con successo per {bronze_full_path}")
+        return True
+    
+    except Exception as e:
+        print(f"Errore nell'aggiornamento della tabella metadata_store.bronze_file_metadata: {e}")
+        traceback.print_exc()
+        return False
+
 # --- FUNZIONE PRINCIPALE CLOUD FUNCTION (Riorganizzata) ---
 @functions_framework.http
 def bronze_to_silver(request: Request):
@@ -1021,6 +1198,33 @@ def bronze_to_silver(request: Request):
                 SILVER_DATA_FILES_ROOT_PREFIX
             )
             
+            # NUOVO: Aggiorna i metadati del file bronze originale
+            # Rimuovi il prefisso di GCS per ottenere solo il path relativo per il blob
+            bronze_blob_path = blob_name_in_gcs
+            if bronze_blob_path.startswith('/'):
+                bronze_blob_path = bronze_blob_path[1:]  # Rimuovi lo slash iniziale se presente
+                
+            # Manteniamo l'aggiornamento dei metadati sul blob
+            update_success = update_bronze_file_metadata(
+                bronze_bucket_name,
+                bronze_blob_path,
+                uri_parquet_in_silver,
+                expected_bq_table_ref,
+                len(df_data_only),
+                processed_columns_with_types
+            )
+            
+            # NUOVO: Aggiorniamo anche la tabella BigQuery metadata_store.bronze_file_metadata
+            update_bq_success = update_bronze_metadata_in_bigquery(
+                project_id,
+                bronze_bucket_name,
+                bronze_blob_path,  # Già senza slash iniziale se necessario
+                uri_parquet_in_silver,
+                expected_bq_table_ref,
+                len(df_data_only),
+                processed_columns_with_types
+            )
+            
             # 9. Prepara e restituisci la risposta
             response_data = {
                 "status": "success",
@@ -1029,7 +1233,9 @@ def bronze_to_silver(request: Request):
                 "columns": processed_columns_with_types,
                 "record_count": len(df_data_only),
                 "silver_path_prefix_base": silver_data_files_base_path,
-                "bigquery_table": expected_bq_table_ref
+                "bigquery_table": expected_bq_table_ref,
+                "bronze_metadata_updated": update_success,
+                "bronze_metadata_updated_in_bigquery": update_bq_success  # Nuova informazione nella risposta
             }
             
             return (response_data, 200, response_cors_headers)

@@ -223,6 +223,27 @@ class _SearchPageState extends State<SearchPage> {
       final List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
       final List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
       
+      // NUOVO: Estrai anche i file già elaborati
+      final List<dynamic> alreadyProcessedFilesRaw = contextAnalysis['already_processed_files'] as List<dynamic>? ?? [];
+      final List<Map<String, dynamic>> alreadyProcessedFiles = alreadyProcessedFilesRaw
+          .where((item) => item is Map<String, dynamic>)
+          .map((item) => item as Map<String, dynamic>)
+          .toList();
+      
+      // Se ci sono file già elaborati, mostra un messaggio informativo
+      if (alreadyProcessedFiles.isNotEmpty) {
+        if (mounted) {
+          setState(() {
+            _currentExecutingQuery = 'Utilizzando tabelle silver esistenti da file già elaborati...';
+          });
+        }
+        
+        // Mostra un dialogo informativo se ci sono file già elaborati
+        if (mounted) {
+          _showAlreadyProcessedFilesDialog(alreadyProcessedFiles);
+        }
+      }
+      
       // Aggiorna l'UI se ci sono file da elaborare
       if (filesToTransformBronze.isNotEmpty) {
         // Preparare la lista di file da elaborare
@@ -256,14 +277,22 @@ class _SearchPageState extends State<SearchPage> {
         List<Map<String, dynamic>> updatedSchemas = List<Map<String, dynamic>>.from(schemas);
         List<String> updatedTableNames = List<String>.from(tableNames);
         
+        // Mantieni traccia se il dialogo è attivo o meno
+        bool isDialogActive = true;
+        
         for (int i = 0; i < _filesToProcess.length; i++) {
-          if (_skipRequested && _filesToProcess.length > 1) {
-            // Se lo skip è stato richiesto e ci sono più file, interrompi l'elaborazione
-            // ma continua in background
+          // Controlla se lo skip è stato richiesto
+          if (_skipRequested && i < _filesToProcess.length) {
+            // Imposta isDialogActive a false quando l'utente fa skip
+            isDialogActive = false;
+            
+            // Deleghiamo l'elaborazione dei file rimanenti al metodo in background
+            // e usciamo dal ciclo, passando lo stato del dialogo
             _processRemainingFilesInBackground(
               dataOrchestrationService, 
               _filesToProcess.sublist(i),
-              transformedSilverFileUris
+              transformedSilverFileUris,
+              false // dialogo non più attivo
             );
             break;
           }
@@ -282,18 +311,25 @@ class _SearchPageState extends State<SearchPage> {
               _filesToProcess[i]['message'] = 'Elaborazione in corso...';
             });
             
-            // Aggiorna immediatamente il dialogo se ancora aperto
-            if (dialogContext != null && Navigator.canPop(dialogContext!)) {
-              // Ricostruisci completamente il dialogo per aggiornare lo stato
-              Navigator.pop(dialogContext!);
-              showDialog(
-                context: context,
-                barrierDismissible: false,
-                builder: (BuildContext context) {
-                  dialogContext = context;
-                  return _buildProcessingDialog(context);
-                },
-              );
+            // Aggiorna immediatamente il dialogo solo se è ancora attivo
+            if (isDialogActive && dialogContext != null && mounted) {
+              try {
+                if (Navigator.canPop(dialogContext!)) {
+                  Navigator.pop(dialogContext!);
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (BuildContext context) {
+                      dialogContext = context;
+                      return _buildProcessingDialog(context);
+                    },
+                  );
+                }
+              } catch (e) {
+                // Se c'è un errore nel Navigator, imposta isDialogActive a false
+                isDialogActive = false;
+                print('Dialog update error: $e');
+              }
             }
           }
           
@@ -318,17 +354,25 @@ class _SearchPageState extends State<SearchPage> {
                     _filesToProcess[i]['message'] = 'Elaborazione completata';
                   });
                   
-                  // Aggiorna immediatamente il dialogo se ancora aperto
-                  if (dialogContext != null && Navigator.canPop(dialogContext!)) {
-                    Navigator.pop(dialogContext!);
-                    showDialog(
-                      context: context,
-                      barrierDismissible: false,
-                      builder: (BuildContext context) {
-                        dialogContext = context;
-                        return _buildProcessingDialog(context);
-                      },
-                    );
+                  // Aggiorna immediatamente il dialogo solo se è ancora attivo
+                  if (isDialogActive && dialogContext != null && mounted) {
+                    try {
+                      if (Navigator.canPop(dialogContext!)) {
+                        Navigator.pop(dialogContext!);
+                        showDialog(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (BuildContext context) {
+                            dialogContext = context;
+                            return _buildProcessingDialog(context);
+                          },
+                        );
+                      }
+                    } catch (e) {
+                      // Se c'è un errore nel Navigator, imposta isDialogActive a false
+                      isDialogActive = false;
+                      print('Dialog update error: $e');
+                    }
                   }
                 }
                 
@@ -360,17 +404,25 @@ class _SearchPageState extends State<SearchPage> {
                   _filesToProcess[i]['message'] = result?['error'] ?? 'Errore sconosciuto';
                 });
                 
-                // Aggiorna immediatamente il dialogo se ancora aperto
-                if (dialogContext != null && Navigator.canPop(dialogContext!)) {
-                  Navigator.pop(dialogContext!);
-                  showDialog(
-                    context: context,
-                    barrierDismissible: false,
-                    builder: (BuildContext context) {
-                      dialogContext = context;
-                      return _buildProcessingDialog(context);
-                    },
-                  );
+                // Aggiorna immediatamente il dialogo solo se è ancora attivo
+                if (isDialogActive && dialogContext != null && mounted) {
+                  try {
+                    if (Navigator.canPop(dialogContext!)) {
+                      Navigator.pop(dialogContext!);
+                      showDialog(
+                        context: context,
+                        barrierDismissible: false,
+                        builder: (BuildContext context) {
+                          dialogContext = context;
+                          return _buildProcessingDialog(context);
+                        },
+                      );
+                    }
+                  } catch (e) {
+                    // Se c'è un errore nel Navigator, imposta isDialogActive a false
+                    isDialogActive = false;
+                    print('Dialog update error: $e');
+                  }
                 }
               }
             }
@@ -382,17 +434,25 @@ class _SearchPageState extends State<SearchPage> {
                 _filesToProcess[i]['message'] = e.toString();
               });
               
-              // Aggiorna immediatamente il dialogo se ancora aperto
-              if (dialogContext != null && Navigator.canPop(dialogContext!)) {
-                Navigator.pop(dialogContext!);
-                showDialog(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (BuildContext context) {
-                    dialogContext = context;
-                    return _buildProcessingDialog(context);
-                  },
-                );
+              // Aggiorna immediatamente il dialogo solo se è ancora attivo
+              if (isDialogActive && dialogContext != null && mounted) {
+                try {
+                  if (Navigator.canPop(dialogContext!)) {
+                    Navigator.pop(dialogContext!);
+                    showDialog(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (BuildContext context) {
+                        dialogContext = context;
+                        return _buildProcessingDialog(context);
+                      },
+                    );
+                  }
+                } catch (e) {
+                  // Se c'è un errore nel Navigator, imposta isDialogActive a false
+                  isDialogActive = false;
+                  print('Dialog update error: $e');
+                }
               }
             }
           }
@@ -430,9 +490,17 @@ class _SearchPageState extends State<SearchPage> {
           dataplexWasSkipped = true;
         }
         
-        // Nasconde il dialogo se è stato mostrato
-        if (mounted && Navigator.canPop(context)) {
-          Navigator.pop(context);
+        // Nasconde il dialogo se è ancora attivo e il widget è montato
+        if (isDialogActive && mounted) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            try {
+              if (mounted && Navigator.canPop(context)) {
+                Navigator.pop(context);
+              }
+            } catch (e) {
+              print('Error closing dialog: $e');
+            }
+          });
         }
         
         // Continua con il resto della pipeline usando solo gli schemi e le tabelle aggiornate
@@ -558,92 +626,7 @@ class _SearchPageState extends State<SearchPage> {
       }
     }
   }
-  
-  // Nuovo metodo per mostrare un dialogo sullo stato di Dataplex
-  void _showDataplexStatusDialog(List<String> transformedFiles) {
-    if (!mounted) return;
-    
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          backgroundColor: const Color.fromARGB(255, 30, 30, 30),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: Row(
-            children: [
-              const Icon(Icons.info_outline, color: Colors.blueAccent),
-              const SizedBox(width: 10),
-              const Text(
-                'Nuovi dati in preparazione',
-                style: TextStyle(color: Colors.white),
-              ),
-            ],
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Stiamo preparando nuovi dati per la tua ricerca. Potrebbero non essere immediatamente disponibili.',
-                  style: TextStyle(color: Colors.white),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'Questi file sono stati elaborati e saranno accessibili tramite BigQuery:',
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.black26,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  padding: const EdgeInsets.all(8),
-                  constraints: const BoxConstraints(maxHeight: 150),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: transformedFiles.length,
-                    itemBuilder: (context, index) {
-                      final filePath = transformedFiles[index];
-                      // Estrai solo il nome del file per visualizzazione più pulita
-                      final fileName = filePath.split('/').last;
-                      return Text(
-                        fileName,
-                        style: const TextStyle(color: Colors.green, fontSize: 12),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Per includere questi dati nei risultati, attendi fino a 10-15 minuti e riformula la tua domanda.',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Questo è normale: Dataplex deve eseguire una scansione e creare le tabelle BigQuery.',
-                  style: TextStyle(color: Colors.orange, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              style: TextButton.styleFrom(foregroundColor: Colors.grey),
-              child: const Text('Ho capito'),
-              onPressed: () => Navigator.of(dialogContext).pop(),
-            ),
-          ],
-        );
-      },
-    );
-  }
-  
-  // Nuovo metodo per costruire il dialogo di elaborazione, sostituisce _showProcessingDialog
+
   Widget _buildProcessingDialog(BuildContext context) {
     // Controlla se ci sono file esistenti in Silver da usare per abilitare lo skip
     final hasExistingSilverData = _filesToProcess.length > 1 || 
@@ -834,6 +817,246 @@ class _SearchPageState extends State<SearchPage> {
           },
         ),
       ],
+    );
+  }
+  
+  // Nuovo metodo per mostrare un dialogo sullo stato di Dataplex
+  void _showDataplexStatusDialog(List<String> transformedFiles) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color.fromARGB(255, 30, 30, 30),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.info_outline, color: Colors.blueAccent),
+              const SizedBox(width: 10),
+              const Text(
+                'Nuovi dati in preparazione',
+                style: TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Stiamo preparando nuovi dati per la tua ricerca. Potrebbero non essere immediatamente disponibili.',
+                  style: TextStyle(color: Colors.white),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Questi file sono stati elaborati e saranno accessibili tramite BigQuery:',
+                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  padding: const EdgeInsets.all(8),
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: transformedFiles.length,
+                    itemBuilder: (context, index) {
+                      final filePath = transformedFiles[index];
+                      // Estrai solo il nome del file per visualizzazione più pulita
+                      final fileName = filePath.split('/').last;
+                      return Text(
+                        fileName,
+                        style: const TextStyle(color: Colors.green, fontSize: 12),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Per includere questi dati nei risultati, attendi fino a 10-15 minuti e riformula la tua domanda.',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Questo è normale: Dataplex deve eseguire una scansione e creare le tabelle BigQuery.',
+                  style: TextStyle(color: Colors.orange, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.grey),
+              child: const Text('Ho capito'),
+              onPressed: () => Navigator.of(dialogContext).pop(),
+            ),
+          ],
+        );
+      },
+    );
+  }
+  
+  // Nuovo metodo per mostrare un dialogo con i file già elaborati
+  void _showAlreadyProcessedFilesDialog(List<Map<String, dynamic>> processedFiles) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: Text('Analisi del contesto'),
+          contentPadding: EdgeInsets.fromLTRB(24, 20, 24, 0), // Rimuovi padding in basso
+          content: Container(
+            width: MediaQuery.of(context).size.width * 0.7,
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.7,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Mostra i file già elaborati in una sezione dedicata
+                if (processedFiles.isNotEmpty)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('File già elaborati:', style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 8),
+                      Container(
+                        padding: EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.green.withOpacity(0.3)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (final fileInfo in processedFiles)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 4.0),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.check_circle, color: Colors.green, size: 16),
+                                    SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text('File: ${fileInfo['file']}', 
+                                              style: TextStyle(fontWeight: FontWeight.w500)),
+                                          Text('Tabella: ${fileInfo['silver_table']}',
+                                              style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(height: 16),
+                    ],
+                  ),
+                
+                // Informazioni sui file da elaborare
+                Text('File da elaborare:', 
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                SizedBox(height: 8),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: (processedFiles.isNotEmpty)
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (final file in processedFiles)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 4.0),
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.file_present, color: Colors.blue, size: 16),
+                                      SizedBox(width: 8),
+                                      Expanded(child: Text(file.toString())),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          )
+                        : Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text('Nessun file da elaborare'),
+                          ),
+                  ),
+                ),
+                
+                SizedBox(height: 16),
+                
+                // Informazioni sulle tabelle rilevanti
+                Text('Tabelle rilevanti per la query:', 
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                SizedBox(height: 8),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: (processedFiles.isNotEmpty)
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (final table in processedFiles)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 4.0),
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.table_chart, color: Colors.purple, size: 16),
+                                      SizedBox(width: 8),
+                                      Expanded(child: Text(table.toString())),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          )
+                        : Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.purple.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text('Nessuna tabella rilevante identificata'),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: Text('Procedi'),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+            TextButton(
+              child: Text('Annulla'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1756,14 +1979,17 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _processRemainingFilesInBackground(
     DataOrchestrationService service,
     List<Map<String, dynamic>> remainingFiles,
-    List<String> alreadyProcessedUris
+    List<String> alreadyProcessedUris,
+    [bool isDialogActive = true] // Parametro per sapere se il dialogo è attivo
   ) async {
     // Elabora il resto dei file in background
     List<String> additionalUris = [];
     
-    for (var fileInfo in remainingFiles) {
+    for (int i = 0; i < remainingFiles.length; i++) {
+      var fileInfo = remainingFiles[i];
+      
       try {
-        // Aggiorna lo stato di elaborazione nell'interfaccia utente
+        // Aggiorna lo stato solo se il widget è ancora montato
         if (mounted) {
           setState(() {
             int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
@@ -1790,7 +2016,7 @@ class _SearchPageState extends State<SearchPage> {
             result['silver_path'] != null) {
           additionalUris.add(result['silver_path']);
           
-          // Aggiorna lo stato a successo nell'interfaccia utente
+          // Aggiorna lo stato a successo nell'interfaccia utente solo se montato
           if (mounted) {
             setState(() {
               int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
@@ -1802,7 +2028,7 @@ class _SearchPageState extends State<SearchPage> {
             });
           }
         } else {
-          // Aggiorna lo stato a errore nell'interfaccia utente
+          // Aggiorna lo stato a errore nell'interfaccia utente solo se montato
           if (mounted) {
             setState(() {
               int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
@@ -1815,7 +2041,7 @@ class _SearchPageState extends State<SearchPage> {
         }
       } catch (e) {
         print('Error processing file in background: $e');
-        // Aggiorna lo stato a errore nell'interfaccia utente
+        // Aggiorna lo stato a errore nell'interfaccia utente solo se montato
         if (mounted) {
           setState(() {
             int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
@@ -1829,22 +2055,25 @@ class _SearchPageState extends State<SearchPage> {
     }
     
     // Se sono stati elaborati file aggiuntivi, avvia una scansione Dataplex per tutti
-    if (additionalUris.isNotEmpty) {
+    if (additionalUris.isNotEmpty && mounted) {
       List<String> allUris = [...alreadyProcessedUris, ...additionalUris];
       try {
-        if (mounted) {
-          setState(() {
-            _dataplexScanInProgress = true;
-          });
-        }
+        setState(() {
+          _dataplexScanInProgress = true;
+        });
         
         await service.triggerBatchDataplexScan(allUris);
         
         if (mounted) {
           setState(() {
             _dataplexScanInProgress = false;
-            _showDataplexStatusDialog(allUris);
           });
+          
+          // Mostra il dialogo di stato solo se il widget è ancora montato
+          // ma NON se il dialogo di elaborazione è ancora attivo
+          if (!isDialogActive) {
+            _showDataplexStatusDialog(allUris);
+          }
         }
       } catch (e) {
         print('Error triggering batch Dataplex scan in background: $e');

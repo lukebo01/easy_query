@@ -24,3 +24,4 @@ gcsfs
 # Aggiungi alle dipendenze esistenti
 google-cloud-dataplex==2.3.0
 google.api_core
+google-cloud-bigquery

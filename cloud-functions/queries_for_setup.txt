@@ -1,0 +1,33 @@
+# Quer per ricreare la tabella dei metadati bronze
+
+CREATE TABLE metadata_store.bronze_file_metadata (
+  file_gcs_uri STRING NOT NULL,
+  bucket_name STRING NOT NULL,
+  file_path STRING NOT NULL,
+  file_name STRING NOT NULL,
+  file_extension STRING,
+  content_type STRING,
+  file_size_bytes INT64,
+  gcs_generation_id STRING,
+  gcs_metageneration_id STRING,
+  gcs_crc32c_hash STRING,
+  gcs_md5_hash STRING,
+  event_time TIMESTAMP,
+  metadata_ingestion_time TIMESTAMP,
+  processing_status STRING,
+  last_processed_by STRING,
+  last_processing_notes STRING,
+  source_system STRING,
+  data_domain STRING,
+  tags ARRAY<STRING>,
+  has_text_content BOOL,
+  additional_metadata JSON,
+  processed BOOL,
+  processed_timestamp TIMESTAMP,
+  silver_path STRING,
+  bigquery_table STRING,
+  record_count INT64,
+  silver_columns JSON
+)
+PARTITION BY DATE(event_time)
+CLUSTER BY bucket_name, data_domain;

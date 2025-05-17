@@ -62,6 +62,23 @@ class DataOrchestrationService {
       List<Map<String, dynamic>> finalSchemas = List<Map<String, dynamic>>.from(initialSchemas);
       List<String> finalTableNames = List<String>.from(initialTableNames);
 
+      // MODIFICA: Gestire i file già elaborati (processed=true) separatamente
+      // Estrai la lista di file già elaborati
+      final List<dynamic> alreadyProcessedFilesRaw = contextAnalysis['already_processed_files'] as List<dynamic>? ?? [];
+      
+      // Aggiungi le tabelle silver già esistenti direttamente alla lista delle tabelle disponibili
+      for (final processedFileInfo in alreadyProcessedFilesRaw) {
+        if (processedFileInfo is Map<String, dynamic>) {
+          final silverTable = processedFileInfo['silver_table'] as String?;
+          if (silverTable != null && silverTable.isNotEmpty) {
+            if (!finalTableNames.contains(silverTable)) {
+              finalTableNames.add(silverTable);
+              dev.log("Added existing Silver table from processed file: $silverTable");
+            }
+          }
+        }
+      }
+
       // 2. Trasformazione Bronze → Silver se suggerita da Gemini
       final List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
       final List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
@@ -191,6 +208,7 @@ class DataOrchestrationService {
         'updatedTableNames': finalTableNames,
         'transformedSilverFileUris': transformedSilverFileUris,
         'dataplexWasSkipped': skipDataplex && transformedSilverFileUris.isNotEmpty,
+        'alreadyProcessedFiles': alreadyProcessedFilesRaw, // Aggiungiamo questa informazione per riferimento
       };
 
     } catch (e, stackTrace) {
