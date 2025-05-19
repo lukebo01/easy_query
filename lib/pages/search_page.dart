@@ -246,18 +246,16 @@ class _SearchPageState extends State<SearchPage> {
       
       // Aggiorna l'UI se ci sono file da elaborare
       if (filesToTransformBronze.isNotEmpty) {
-        // Preparare la lista di file da elaborare
-        final filesList = filesToTransformBronze.map((filePath) => {
-          'path': filePath,
-          'status': 'pending', // può essere: pending, processing, success, error
-          'message': '',
-          'silver_path': '',
-        }).toList();
-        
+        // Preparare la lista di file da elaborare per tracciare lo stato
         if (mounted) {
           setState(() {
             _isProcessingFiles = true;
-            _filesToProcess = filesList;
+            _filesToProcess = filesToTransformBronze.map((filePath) => {
+              'path': filePath,
+              'status': 'pending',
+              'message': '',
+              'silver_path': '',
+            }).toList();
           });
         }
         
@@ -272,60 +270,29 @@ class _SearchPageState extends State<SearchPage> {
           },
         );
         
-        // Elabora i file uno alla volta e aggiorna l'UI in tempo reale
-        List<String> transformedSilverFileUris = [];
-        List<Map<String, dynamic>> updatedSchemas = List<Map<String, dynamic>>.from(schemas);
-        List<String> updatedTableNames = List<String>.from(tableNames);
-        
-        // Mantieni traccia se il dialogo è attivo o meno
-        bool isDialogActive = true;
-        
-        for (int i = 0; i < _filesToProcess.length; i++) {
-          // Controlla se lo skip è stato richiesto
-          if (_skipRequested) {
-            // Se l'utente ha fatto skip, interrompe completamente l'elaborazione 
-            // e procede con i dati già disponibili
-            isDialogActive = false;
-            
-            // NUOVO: Aggiorniamo gli schemi e le tabelle finali rimuovendo quelle che non verranno create
-            // Questo è fondamentale per evitare errori di "tabella non trovata" nella query finale
+        // Usa la versione migliorata di analyzeQueryAndPrepareData che supporta callback di stato
+        final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
+          question, schemas, tableNames, sampleData, cloudFilesMetadata,
+          skipDataplex: true,
+          onFileStatusChange: (updatedFilesStatus) {
             if (mounted) {
               setState(() {
-                // Rimuovi dai nomi delle tabelle e dagli schemi tutti i file che non sono stati elaborati
-                for (int j = i; j < _filesToProcess.length; j++) {
-                  final filePathToSkip = _filesToProcess[j]['path'];
-                  log('Skipping file processing and removing potential tables for: $filePathToSkip');
-                  
-                  // Se questo file era già in processing, segna come error
-                  if (_filesToProcess[j]['status'] == 'processing') {
-                    _filesToProcess[j]['status'] = 'skipped';
-                    _filesToProcess[j]['message'] = 'Elaborazione saltata dall\'utente';
+                _filesToProcess = updatedFilesStatus;
+                
+                // Se lo skip è stato richiesto, aggiorna lo stato dei file rimanenti
+                if (_skipRequested) {
+                  for (int j = 0; j < _filesToProcess.length; j++) {
+                    if (_filesToProcess[j]['status'] == 'pending') {
+                      _filesToProcess[j]['status'] = 'skipped';
+                      _filesToProcess[j]['message'] = 'Elaborazione saltata dall\'utente';
+                    }
                   }
                 }
               });
-            }
-            
-            break; // Esci dal ciclo senza processare altri file
-          }
-          
-          // Prima aggiorna i file precedenti con stato success se erano in elaborazione
-          if (mounted) {
-            setState(() {
-              for (int j = 0; j < i; j++) {
-                if (_filesToProcess[j]['status'] == 'processing') {
-                  _filesToProcess[j]['status'] = 'success';
-                }
-              }
               
-              // Imposta il file corrente in elaborazione
-              _filesToProcess[i]['status'] = 'processing';
-              _filesToProcess[i]['message'] = 'Elaborazione in corso...';
-            });
-            
-            // Aggiorna immediatamente il dialogo solo se è ancora attivo
-            if (isDialogActive && dialogContext != null && mounted) {
+              // Aggiorna il dialogo se è attivo
               try {
-                if (Navigator.canPop(dialogContext!)) {
+                if (dialogContext != null && Navigator.canPop(dialogContext!)) {
                   Navigator.pop(dialogContext!);
                   showDialog(
                     context: context,
@@ -337,190 +304,51 @@ class _SearchPageState extends State<SearchPage> {
                   );
                 }
               } catch (e) {
-                // Se c'è un errore nel Navigator, imposta isDialogActive a false
-                isDialogActive = false;
                 print('Dialog update error: $e');
               }
             }
-          }
-          
+          },
+        );
+        
+        // Nasconde il dialogo quando il processo è completato
+        if (mounted && dialogContext != null) {
           try {
-            // Elabora il file
-            final bronzeFileGcsUri = _filesToProcess[i]['path'];
-            final result = await dataOrchestrationService.transformBronzeToSilver(
-              bronzeFileGcsUri,
-              // skipDataplex è sempre true perché vogliamo sempre una scansione collettiva
-              skipDataplex: true
-            );
-            
-            if (result != null && result['status'] == 'success') {
-              final silverPath = result['silver_path'] as String?;
-              if (silverPath != null && silverPath.isNotEmpty) {
-                transformedSilverFileUris.add(silverPath);
-                
-                // Aggiorna lo stato a 'success'
-                if (mounted) {
-                  setState(() {
-                    _filesToProcess[i]['status'] = 'success';
-                    _filesToProcess[i]['silver_path'] = silverPath;
-                    _filesToProcess[i]['message'] = 'Elaborazione completata';
-                  });
-                  
-                  // Aggiorna immediatamente il dialogo solo se è ancora attivo
-                  if (isDialogActive && dialogContext != null && mounted) {
-                    try {
-                      if (Navigator.canPop(dialogContext!)) {
-                        Navigator.pop(dialogContext!);
-                        showDialog(
-                          context: context,
-                          barrierDismissible: false,
-                          builder: (BuildContext context) {
-                            dialogContext = context;
-                            return _buildProcessingDialog(context);
-                          },
-                        );
-                      }
-                    } catch (e) {
-                      // Se c'è un errore nel Navigator, imposta isDialogActive a false
-                      isDialogActive = false;
-                      print('Dialog update error: $e');
-                    }
-                  }
-                }
-                
-                // Aggiorna gli schemi e i nomi delle tabelle
-                final bigQueryTableName = result['bigquery_table'] as String?;
-                if (bigQueryTableName != null && bigQueryTableName.isNotEmpty) {
-                  if (!updatedTableNames.contains(bigQueryTableName)) {
-                    updatedTableNames.add(bigQueryTableName);
-                  }
-                  
-                  // Aggiungi informazioni dello schema
-                  if (result['columns'] != null && result['columns'] is List) {
-                    final List<dynamic> columnsRaw = result['columns'] as List<dynamic>;
-                    if (columnsRaw.isNotEmpty) {
-                      Map<String, dynamic> schemaMap = {
-                        'table_name': bigQueryTableName,
-                        'columns': columnsRaw
-                      };
-                      updatedSchemas.add(schemaMap);
-                    }
-                  }
-                }
-              }
-            } else {
-              // Aggiorna lo stato a 'error'
-              if (mounted) {
-                setState(() {
-                  _filesToProcess[i]['status'] = 'error';
-                  _filesToProcess[i]['message'] = result?['error'] ?? 'Errore sconosciuto';
-                });
-                
-                // Aggiorna immediatamente il dialogo solo se è ancora attivo
-                if (isDialogActive && dialogContext != null && mounted) {
-                  try {
-                    if (Navigator.canPop(dialogContext!)) {
-                      Navigator.pop(dialogContext!);
-                      showDialog(
-                        context: context,
-                        barrierDismissible: false,
-                        builder: (BuildContext context) {
-                          dialogContext = context;
-                          return _buildProcessingDialog(context);
-                        },
-                      );
-                    }
-                  } catch (e) {
-                    // Se c'è un errore nel Navigator, imposta isDialogActive a false
-                    isDialogActive = false;
-                    print('Dialog update error: $e');
-                  }
-                }
-              }
+            if (Navigator.canPop(dialogContext!)) {
+              Navigator.pop(dialogContext!);
             }
           } catch (e) {
-            // Gestione errori
-            if (mounted) {
-              setState(() {
-                _filesToProcess[i]['status'] = 'error';
-                _filesToProcess[i]['message'] = e.toString();
-              });
-              
-              // Aggiorna immediatamente il dialogo solo se è ancora attivo
-              if (isDialogActive && dialogContext != null && mounted) {
-                try {
-                  if (Navigator.canPop(dialogContext!)) {
-                    Navigator.pop(dialogContext!);
-                    showDialog(
-                      context: context,
-                      barrierDismissible: false,
-                      builder: (BuildContext context) {
-                        dialogContext = context;
-                        return _buildProcessingDialog(context);
-                      },
-                    );
-                  }
-                } catch (e) {
-                  // Se c'è un errore nel Navigator, imposta isDialogActive a false
-                  isDialogActive = false;
-                  print('Dialog update error: $e');
-                }
-              }
-            }
+            print('Error closing dialog: $e');
           }
         }
         
-        // Se ci sono file trasformati e non è stato richiesto di saltare
-        if (transformedSilverFileUris.isNotEmpty) {
-          // Avvia sempre la scansione Dataplex batch alla fine
-          if (mounted) {
-            setState(() {
-              _dataplexScanInProgress = true;
-            });
-          }
-          
-          try {
-            final dataplexResult = await dataOrchestrationService.triggerBatchDataplexScan(transformedSilverFileUris);
-            dataplexWasSkipped = false;
-            
-            if (mounted) {
-              setState(() {
-                _dataplexScanInProgress = false;
-              });
-            }
-          } catch (e) {
-            print('Error triggering Dataplex scan: $e');
-            dataplexWasSkipped = true;
-            
-            if (mounted) {
-              setState(() {
-                _dataplexScanInProgress = false;
-              });
-            }
-          }
-        }
+        log('Orchestration result: ${jsonEncode(orchestrationResult)}');
         
-        // Nasconde il dialogo se è ancora attivo e il widget è montato
-        if (isDialogActive && mounted) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            try {
-              if (mounted && Navigator.canPop(context)) {
-                Navigator.pop(context);
-              }
-            } catch (e) {
-              print('Error closing dialog: $e');
-            }
-          });
-        }
-        
-        // Continua con il resto della pipeline usando solo gli schemi e le tabelle aggiornate
+        // Continua con il resto della pipeline usando i risultati dell'orchestrazione
         if (mounted) {
           setState(() {
             _isProcessingFiles = false;
             _currentExecutingQuery = 'Building optimized query...';
           });
         }
+
+        final contextAnalysis = orchestrationResult['contextAnalysis'];
+        final List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
+            ?.map((item) => item as Map<String, dynamic>)
+            ?.toList() ?? [];
+        final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
+            ?.map((item) => item.toString())
+            ?.toList() ?? [];
+            
+        // Controlla se Dataplex è stato saltato e ci sono nuovi file
+        final dataplexWasSkipped = orchestrationResult['dataplexWasSkipped'] == true;
+        final transformedSilverFileUris = (orchestrationResult['transformedSilverFileUris'] as List?)?.cast<String>() ?? [];
         
+        if (dataplexWasSkipped && transformedSilverFileUris.isNotEmpty) {
+          // Mostra un avviso all'utente sulla disponibilità dei dati
+          _showDataplexStatusDialog(transformedSilverFileUris);
+        }
+
+        // Procedi con la generazione della query SQL
         final sqlQuery = await widget.geminiService.generateSqlQuery(
           question,
           jsonEncode(updatedSchemas), 
@@ -530,8 +358,8 @@ class _SearchPageState extends State<SearchPage> {
         );
 
         final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
-                                    .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
-                                    .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+                                 .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
+                                 .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
         log('Executing SQL query from Gemini: $cleanedSqlQuery');
 
         if (mounted) {
@@ -539,7 +367,7 @@ class _SearchPageState extends State<SearchPage> {
         }
 
         final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
-        log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
+        log('Query Results from BQ: ${results.length} rows.');
 
         if (mounted) {
           setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
@@ -561,6 +389,15 @@ class _SearchPageState extends State<SearchPage> {
           // skipDataplex è sempre true, non è più un parametro per scegliere la modalità
           skipDataplex: true,
         );
+        log('Orchestration result: ${jsonEncode(orchestrationResult)}');
+
+        if (mounted) {
+          setState(() { _currentExecutingQuery = 'Waiting for Dataplex scan...'; });
+        }
+
+        log('Waiting for Dataplex scan to complete...');
+
+        await dataOrchestrationService.waitForAllSilverTables(orchestrationResult['updatedTableNames']);
         
         final contextAnalysis = orchestrationResult['contextAnalysis'];
         // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
@@ -831,7 +668,6 @@ class _SearchPageState extends State<SearchPage> {
       barrierDismissible: true,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          backgroundColor: const Color.fromARGB(255, 30, 30, 30),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -1964,116 +1800,4 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  Future<void> _processRemainingFilesInBackground(
-    DataOrchestrationService service,
-    List<Map<String, dynamic>> remainingFiles,
-    List<String> alreadyProcessedUris,
-    [bool isDialogActive = true]
-  ) async {
-    // Questo metodo non dovrebbe essere chiamato quando si preme Skip
-    if (_skipRequested) return;
-    
-    // Elabora il resto dei file in background
-    List<String> additionalUris = [];
-    
-    for (int i = 0; i < remainingFiles.length; i++) {
-      var fileInfo = remainingFiles[i];
-      
-      try {
-        // Aggiorna lo stato solo se il widget è ancora montato
-        if (mounted) {
-          setState(() {
-            int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
-            if (index >= 0) {  // Corretto l'errore di sintassi qui
-              // Imposta prima i file precedenti a success se erano in processing
-              for (int j = 0; j < index; j++) {
-                if (_filesToProcess[j]['status'] == 'processing') {
-                  _filesToProcess[j]['status'] = 'success';
-                }
-              }
-              _filesToProcess[index]['status'] = 'processing';
-              _filesToProcess[index]['message'] = 'Elaborazione in background...';
-            }
-          });
-        }
-        
-        final result = await service.transformBronzeToSilver(
-          fileInfo['path'],
-          skipDataplex: true  // Sempre true per la scansione collettiva
-        );
-        
-        if (result != null && 
-            result['status'] == 'success' && 
-            result['silver_path'] != null) {
-          additionalUris.add(result['silver_path']);
-          
-          // Aggiorna lo stato a successo nell'interfaccia utente solo se montato
-          if (mounted) {
-            setState(() {
-              int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
-              if (index >= 0) {
-                _filesToProcess[index]['status'] = 'success';
-                _filesToProcess[index]['message'] = 'Elaborazione completata in background';
-                _filesToProcess[index]['silver_path'] = result['silver_path'];
-              }
-            });
-          }
-        } else {
-          // Aggiorna lo stato a errore nell'interfaccia utente solo se montato
-          if (mounted) {
-            setState(() {
-              int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
-              if (index >= 0) {
-                _filesToProcess[index]['status'] = 'error';
-                _filesToProcess[index]['message'] = result?['error'] ?? 'Errore sconosciuto';
-              }
-            });
-          }
-        }
-      } catch (e) {
-        print('Error processing file in background: $e');
-        // Aggiorna lo stato a errore nell'interfaccia utente solo se montato
-        if (mounted) {
-          setState(() {
-            int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
-            if (index >= 0) {
-              _filesToProcess[index]['status'] = 'error';
-              _filesToProcess[index]['message'] = e.toString();
-            }
-          });
-        }
-      }
-    }
-    
-    // Se sono stati elaborati file aggiuntivi, avvia una scansione Dataplex per tutti
-    if (additionalUris.isNotEmpty && mounted) {
-      List<String> allUris = [...alreadyProcessedUris, ...additionalUris];
-      try {
-        setState(() {
-          _dataplexScanInProgress = true;
-        });
-        
-        await service.triggerBatchDataplexScan(allUris);
-        
-        if (mounted) {
-          setState(() {
-            _dataplexScanInProgress = false;
-          });
-          
-          // Mostra il dialogo di stato solo se il widget è ancora montato
-          // ma NON se il dialogo di elaborazione è ancora attivo
-          if (!isDialogActive) {
-            _showDataplexStatusDialog(allUris);
-          }
-        }
-      } catch (e) {
-        print('Error triggering batch Dataplex scan in background: $e');
-        if (mounted) {
-          setState(() {
-            _dataplexScanInProgress = false;
-          });
-        }
-      }
-    }
-  }
 }

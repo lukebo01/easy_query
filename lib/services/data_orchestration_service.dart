@@ -36,6 +36,7 @@ class DataOrchestrationService {
   /// Analizza la query utente e decide se è necessario eseguire trasformazioni
   /// skipDataplex: sempre true, indica che la scansione Dataplex viene fatta
   /// in modo collettivo alla fine e non per singolo file
+  /// onFileStatusChange: callback per aggiornare lo stato di elaborazione dei singoli file nella UI
   Future<Map<String, dynamic>> analyzeQueryAndPrepareData(
     String userQuestion,
     List<Map<String, dynamic>> initialSchemas,
@@ -43,6 +44,7 @@ class DataOrchestrationService {
     Map<String, List<Map<String, dynamic>>> initialSampleData,
     List<Map<String, dynamic>> bronzeMetadata, {
     bool skipDataplex = true, // Sempre true per fare una sola scansione collettiva alla fine
+    Function(List<Map<String, dynamic>> filesStatus)? onFileStatusChange,
   }) async {
     dev.log("Starting data orchestration for user question: \"$userQuestion\"");
 
@@ -67,10 +69,33 @@ class DataOrchestrationService {
       List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
       List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
 
+      // Preparazione dell'elenco dei file per lo stato iniziale dell'UI
+      List<Map<String, dynamic>> filesStatus = [];
+      if (filesToTransformBronze.isNotEmpty && onFileStatusChange != null) {
+        filesStatus = filesToTransformBronze.map((filePath) => {
+          'path': filePath,
+          'status': 'pending', // può essere: pending, processing, success, error, skipped
+          'message': '',
+          'silver_path': '',
+        }).toList();
+        
+        // Invio dello stato iniziale
+        onFileStatusChange(filesStatus);
+      }
+
       if (filesToTransformBronze.isNotEmpty) {
         dev.log("Gemini suggested ${filesToTransformBronze.length} files for Bronze-to-Silver transformation");
 
-        for (String bronzeFileGcsUri in filesToTransformBronze) {
+        for (int i = 0; i < filesToTransformBronze.length; i++) {
+          final bronzeFileGcsUri = filesToTransformBronze[i];
+          
+          // Aggiorna lo stato del file corrente a "processing"
+          if (onFileStatusChange != null && i < filesStatus.length) {
+            filesStatus[i]['status'] = 'processing';
+            filesStatus[i]['message'] = 'Elaborazione in corso...';
+            onFileStatusChange(filesStatus);
+          }
+          
           dev.log("Processing Bronze file for Silver transformation: $bronzeFileGcsUri");
           final silverTransformResult = await transformBronzeToSilver(bronzeFileGcsUri, skipDataplex: skipDataplex);
 
@@ -80,6 +105,14 @@ class DataOrchestrationService {
             if (silverPathUri != null && silverPathUri.isNotEmpty) {
               dev.log("Bronze file $bronzeFileGcsUri transformed/found at Silver path: $silverPathUri");
               transformedSilverFileUris.add(silverPathUri);
+              
+              // Aggiorna lo stato del file a "success"
+              if (onFileStatusChange != null && i < filesStatus.length) {
+                filesStatus[i]['status'] = 'success';
+                filesStatus[i]['silver_path'] = silverPathUri;
+                filesStatus[i]['message'] = 'Elaborazione completata';
+                onFileStatusChange(filesStatus);
+              }
 
               final String? bigQueryTableName = silverTransformResult['bigquery_table'] as String?;
               String silverFileNameNoExt = ''; // Per fallback
@@ -163,9 +196,21 @@ class DataOrchestrationService {
               }
             } else {
               dev.log('Warning: Bronze-to-Silver success response for $bronzeFileGcsUri missing valid "silver_path". Result: $silverTransformResult', level: 900);
+              // Aggiorna lo stato del file a "error"
+              if (onFileStatusChange != null && i < filesStatus.length) {
+                filesStatus[i]['status'] = 'error';
+                filesStatus[i]['message'] = 'Percorso Silver mancante';
+                onFileStatusChange(filesStatus);
+              }
             }
           } else {
             dev.log('Warning: Bronze-to-Silver transformation failed or status was not "success" for $bronzeFileGcsUri. Result: $silverTransformResult', level: 900);
+            // Aggiorna lo stato del file a "error"
+            if (onFileStatusChange != null && i < filesStatus.length) {
+              filesStatus[i]['status'] = 'error';
+              filesStatus[i]['message'] = silverTransformResult?['error'] ?? 'Errore sconosciuto';
+              onFileStatusChange(filesStatus);
+            }
           }
         }
         
@@ -173,10 +218,8 @@ class DataOrchestrationService {
         // avvia una singola scansione Dataplex per tutti i file
         if (skipDataplex && transformedSilverFileUris.isNotEmpty) {
           dev.log("Triggering batch Dataplex scan for ${transformedSilverFileUris.length} Silver files");
-          final dataplexResult = await triggerBatchDataplexScan(transformedSilverFileUris);
-          dev.log("ciao");
+          final dataplexResult = await triggerBatchDataplexScan(transformedSilverFileUris,finalTableNames);
           if (dataplexResult != null) {
-            dev.log("ciao2");
             dev.log("Batch Dataplex scan triggered: ${jsonEncode(dataplexResult)}");
             // Non attendiamo il completamento qui - sarà asincrono
           } else {
@@ -187,55 +230,25 @@ class DataOrchestrationService {
         dev.log("No Bronze files suggested for transformation by Gemini.");
       }
 
-      // Non vado avanti finchè da getTables non ottengo tutte le tabelle che mi aspetto nel dataset "silver-zone"
-      // Faccio un ciclo che rimane true finchè non ho tutte le tabelle
-      while (true) {
-        final tables = await _bigQueryService.getTables("silver_zone");
-        dev.log("Tables fetched: $tables");
-        
-        // Verifica se tutte le tabelle attese sono presenti
-        bool allTablesFound = true;
-        for (String fullTableName in finalTableNames) {
-          // Estrai solo il nome della tabella dal nome completo (project.dataset.table)
-          String tableNameOnly = fullTableName;
-          if (fullTableName.contains('.')) {
-            tableNameOnly = fullTableName.split('.').last;
-          }
-          
-          if (tables == null || !tables.contains(tableNameOnly)) {
-            allTablesFound = false;
-            dev.log("Tabella non trovata: $fullTableName (nome semplice: $tableNameOnly)");
-          }
-        }
-        
-        if (allTablesFound) {
-          dev.log("Tutte le tabelle attese (${finalTableNames.length}) sono presenti nella Silver zone.");
-          break;
-        } else {
-          dev.log("Tabelle lette: ${tables?.join(', ')}");
-          dev.log("Tabelle attese (nomi completi): ${finalTableNames.join(', ')}");
-          dev.log("Non tutte le tabelle attese sono presenti nella Silver zone. Attendo 1 minuto prima di riprovare...");
-          await Future.delayed(const Duration(minutes: 1));
-        }
-      }
-
+      // Aspettiamo
       return {
         'contextAnalysis': contextAnalysis,
         'updatedSchemas': finalSchemas,
         'updatedTableNames': finalTableNames,
         'transformedSilverFileUris': transformedSilverFileUris,
-        'dataplexWasSkipped': skipDataplex && transformedSilverFileUris.isNotEmpty
+        'dataplexWasSkipped': skipDataplex && transformedSilverFileUris.isNotEmpty,
+        'filesStatus': filesStatus
       };
 
     } catch (e, stackTrace) {
-       print("!!! CATTURATA ECCEZIONE CRITICA IN analyzeQueryAndPrepareData: $e");
       dev.log("Critical error in data orchestration pipeline: $e", error: e, stackTrace: stackTrace, level: 1200);
       return {
         'contextAnalysis': {'error': 'Orchestration failed: $e'},
         'updatedSchemas': initialSchemas,
         'updatedTableNames': initialTableNames,
         'transformedSilverFileUris': <String>[],
-        'dataplexWasSkipped': false
+        'dataplexWasSkipped': false,
+        'filesStatus': <Map<String, dynamic>>[]
       };
     }
   }
@@ -286,9 +299,10 @@ class DataOrchestrationService {
   }
   
   /// Avvia una scansione Dataplex batch per tutti i file Silver generati
-  Future<Map<String, dynamic>?> triggerBatchDataplexScan(List<String> silverFileUris) async {
+  Future<Map<String, dynamic>?> triggerBatchDataplexScan(List<String> silverFileUris,var finalTableNames) async {
     try {
       dev.log("Triggering batch Dataplex scan for ${silverFileUris.length} files");
+      
       
       final requestBody = {
         "silver_files": silverFileUris
@@ -305,6 +319,9 @@ class DataOrchestrationService {
       if (response.statusCode >= 200 && response.statusCode < 300) {
         dev.log("2");
         final result = jsonDecode(response.body) as Map<String, dynamic>;
+        dev.log("WAITING DATAPLEX!!!!!");
+        await waitForAllSilverTables(finalTableNames);
+        dev.log('"DATAPLEX SCANNING COMPLETED!"');
         return result;
       } else if (response.statusCode == 429) {
         dev.log("no1");
@@ -319,6 +336,37 @@ class DataOrchestrationService {
       dev.log("no3");
       dev.log("Exception calling Batch Dataplex scan function: $e", error: e);
       return {"status": "error", "error": e.toString()};
+    }
+  }
+
+  /// Attende che tutte le tabelle attese siano presenti nel dataset "silver_zone"
+  Future<void> waitForAllSilverTables(List<String> finalTableNames) async {
+    while (true) {
+      final tables = await _bigQueryService.getTables("silver_zone");
+      dev.log("Tables fetched: $tables");
+
+      bool allTablesFound = true;
+      for (String fullTableName in finalTableNames) {
+        String tableNameOnly = fullTableName;
+        if (fullTableName.contains('.')) {
+          tableNameOnly = fullTableName.split('.').last;
+        }
+
+        if (tables == null || !tables.contains(tableNameOnly)) {
+          allTablesFound = false;
+          dev.log("Tabella non trovata: $fullTableName (nome semplice: $tableNameOnly)");
+        }
+      }
+
+      if (allTablesFound) {
+        dev.log("Tutte le tabelle attese (${finalTableNames.length}) sono presenti nella Silver zone.");
+        break;
+      } else {
+        dev.log("Tabelle lette: ${tables?.join(', ')}");
+        dev.log("Tabelle attese (nomi completi): ${finalTableNames.join(', ')}");
+        dev.log("Non tutte le tabelle attese sono presenti nella Silver zone. Attendo 1 minuto prima di riprovare...");
+        await Future.delayed(const Duration(minutes: 1));
+      }
     }
   }
 
