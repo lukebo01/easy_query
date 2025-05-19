@@ -299,10 +299,14 @@ class DataOrchestrationService {
   }
   
   /// Avvia una scansione Dataplex batch per tutti i file Silver generati
-  Future<Map<String, dynamic>?> triggerBatchDataplexScan(List<String> silverFileUris,var finalTableNames) async {
+  Future<Map<String, dynamic>?> triggerBatchDataplexScan(List<String> silverFileUris, List<String> finalTableNames) async {
     try {
       dev.log("Triggering batch Dataplex scan for ${silverFileUris.length} files");
       
+      // Importante: lavoriamo solo con le tabelle relative ai file silver attuali
+      // Creiamo una copia locale delle tabelle che contenga solo quelle generate in questa esecuzione
+      final currentTablesOnly = List<String>.from(finalTableNames);
+      dev.log("Tabelle da attendere: ${currentTablesOnly.join(', ')}");
       
       final requestBody = {
         "silver_files": silverFileUris
@@ -320,7 +324,7 @@ class DataOrchestrationService {
         dev.log("2");
         final result = jsonDecode(response.body) as Map<String, dynamic>;
         dev.log("WAITING DATAPLEX!!!!!");
-        await waitForAllSilverTables(finalTableNames);
+        await waitForAllSilverTables(currentTablesOnly); // Passa la copia locale invece dell'originale
         dev.log('"DATAPLEX SCANNING COMPLETED!"');
         return result;
       } else if (response.statusCode == 429) {

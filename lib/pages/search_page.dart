@@ -116,8 +116,12 @@ class _SearchPageState extends State<SearchPage> {
       });
     }
 
-    List<Map<String, dynamic>> cloudFilesMetadata = []; // Inizializza per il blocco finally
+    // Reset esplicito delle liste per ogni nuova query
+    List<Map<String, dynamic>> cloudFilesMetadata = []; 
     bool dataplexWasSkipped = false;
+    List<Map<String, dynamic>> schemas = [];
+    List<String> tableNames = [];
+    Map<String, List<Map<String, dynamic>>> sampleData = {};
 
     try {
       final projectId = widget.bigQueryService.projectId;
@@ -134,9 +138,6 @@ class _SearchPageState extends State<SearchPage> {
       }
       log('Dataset to tables mapping: $datasetTablesMap');
 
-      List<Map<String, dynamic>> schemas = [];
-      List<String> tableNames = [];
-      Map<String, List<Map<String, dynamic>>> sampleData = {};
 
       // Recupera prima i metadati bronze, potrebbero servire per derivare partizioni campione
       cloudFilesMetadata = await widget.bigQueryService.getBronzeMetadata();
