@@ -138,7 +138,7 @@ class BigQueryService {
       throw Exception('BigQuery service not initialized');
     }
 
-    const query = """
+    var query = """
       SELECT
         CONCAT('gs://', bucket_name, file_path) as file_gcs_uri,
         bucket_name,
@@ -158,14 +158,32 @@ class BigQueryService {
         last_processing_notes,
         source_system,
         data_domain,
-        tags
+        tags,
+        has_text_content,
+        additional_metadata,
+        processed,
+        processed_timestamp,
+        silver_path,
+        bigquery_table,
+        record_count,
+        silver_columns,
       FROM `soy-transducer-456512-t0.metadata_store.bronze_file_metadata`
       ORDER BY metadata_ingestion_time DESC
     """;
 
     try {
       log('Fetching bronze metadata from BigQuery');
-      final results = await executeQuery(query);
+      var results = await executeQuery(query);
+
+      // Elimino dai risultati tutti i record in cui il campo 'file_gcs_uri' è duplicato
+      results = results
+          .where((row) =>
+              results
+                  .where((r) => r['file_gcs_uri'] == row['file_gcs_uri'])
+                  .length ==
+              1)
+          .toList();
+
       log('Retrieved ${results.length} metadata records');
       return results;
     } catch (e) {

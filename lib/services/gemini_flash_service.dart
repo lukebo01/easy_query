@@ -82,22 +82,15 @@ class GeminiFlashService {
               7. Evaluate if cloud files are needed for the query considering their name, path, date and metadata; they will be trasformed in tables so suggest them ONLY IF NEEDED
               8. Cloud file names should be written with full and correct path, including the folder structure
               9. NEVER include file names form cloud files into the relevant tables list, use only the table names from the schemas for that scope
-              10. IMPORTANT: For cloud files, check if they have already been processed by looking at these metadata fields:
-                 - 'processed' field: If true, the file has already been transformed
-                 - 'processed_timestamp' field: Contains when the file was processed
-                 - 'silver_path' field: Contains the path to the silver file
-                 - 'bigquery_table' field: Contains the name of the BigQuery table created
-                 - 'record_count' field: Contains the number of records in the silver table
               
-              If a file has been processed (processed=true OR silver_path is not empty), DO NOT suggest it for processing 
-              and instead use the 'bigquery_table' value from its metadata directly in the relevant_tables list.
+              ATTENTION:
+              You must evaluate which bronze cloud files are needed for the query before analyzing the silver and gold tables.
 
               IMPORTANT: For join conditions, you MUST examine the actual sample data values to determine true relationships between tables, not just column names.
               
               Return your analysis as a JSON object with this structure:
               {
                 "suggested_files": ["file1", "file2", "file3"],
-                "already_processed_files": [{"file": "path/to/file.csv", "silver_table": "table_name"}],
                 "relevant_tables": ["table1", "table2", "table3"],
                 "relevant_columns": {
                   "table1": ["col1", "col2"],

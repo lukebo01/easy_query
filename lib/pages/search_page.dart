@@ -282,19 +282,30 @@ class _SearchPageState extends State<SearchPage> {
         
         for (int i = 0; i < _filesToProcess.length; i++) {
           // Controlla se lo skip è stato richiesto
-          if (_skipRequested && i < _filesToProcess.length) {
-            // Imposta isDialogActive a false quando l'utente fa skip
+          if (_skipRequested) {
+            // Se l'utente ha fatto skip, interrompe completamente l'elaborazione 
+            // e procede con i dati già disponibili
             isDialogActive = false;
             
-            // Deleghiamo l'elaborazione dei file rimanenti al metodo in background
-            // e usciamo dal ciclo, passando lo stato del dialogo
-            _processRemainingFilesInBackground(
-              dataOrchestrationService, 
-              _filesToProcess.sublist(i),
-              transformedSilverFileUris,
-              false // dialogo non più attivo
-            );
-            break;
+            // NUOVO: Aggiorniamo gli schemi e le tabelle finali rimuovendo quelle che non verranno create
+            // Questo è fondamentale per evitare errori di "tabella non trovata" nella query finale
+            if (mounted) {
+              setState(() {
+                // Rimuovi dai nomi delle tabelle e dagli schemi tutti i file che non sono stati elaborati
+                for (int j = i; j < _filesToProcess.length; j++) {
+                  final filePathToSkip = _filesToProcess[j]['path'];
+                  log('Skipping file processing and removing potential tables for: $filePathToSkip');
+                  
+                  // Se questo file era già in processing, segna come error
+                  if (_filesToProcess[j]['status'] == 'processing') {
+                    _filesToProcess[j]['status'] = 'skipped';
+                    _filesToProcess[j]['message'] = 'Elaborazione saltata dall\'utente';
+                  }
+                }
+              });
+            }
+            
+            break; // Esci dal ciclo senza processare altri file
           }
           
           // Prima aggiorna i file precedenti con stato success se erano in elaborazione
@@ -338,7 +349,8 @@ class _SearchPageState extends State<SearchPage> {
             final bronzeFileGcsUri = _filesToProcess[i]['path'];
             final result = await dataOrchestrationService.transformBronzeToSilver(
               bronzeFileGcsUri,
-              skipDataplex: true // Saltiamo Dataplex individuale
+              // skipDataplex è sempre true perché vogliamo sempre una scansione collettiva
+              skipDataplex: true
             );
             
             if (result != null && result['status'] == 'success') {
@@ -459,8 +471,8 @@ class _SearchPageState extends State<SearchPage> {
         }
         
         // Se ci sono file trasformati e non è stato richiesto di saltare
-        if (transformedSilverFileUris.isNotEmpty && !_skipRequested) {
-          // Avvia la scansione Dataplex batch
+        if (transformedSilverFileUris.isNotEmpty) {
+          // Avvia sempre la scansione Dataplex batch alla fine
           if (mounted) {
             setState(() {
               _dataplexScanInProgress = true;
@@ -486,8 +498,6 @@ class _SearchPageState extends State<SearchPage> {
               });
             }
           }
-        } else if (_skipRequested) {
-          dataplexWasSkipped = true;
         }
         
         // Nasconde il dialogo se è ancora attivo e il widget è montato
@@ -548,6 +558,7 @@ class _SearchPageState extends State<SearchPage> {
         // Nessun file da elaborare, procedi normalmente
         final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
           question, schemas, tableNames, sampleData, cloudFilesMetadata,
+          // skipDataplex è sempre true, non è più un parametro per scegliere la modalità
           skipDataplex: true,
         );
         
@@ -762,25 +773,16 @@ class _SearchPageState extends State<SearchPage> {
                 });
               }
               
-              // Se Dataplex è in corso, chiudi il dialogo e continua
-              if (_dataplexScanInProgress) {
-                Navigator.of(context).pop();
-              } else {
-                // Altrimenti aggiungi un messaggio e mostra per qualche secondo
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Processamento in background avviato. Procedendo con i dati disponibili.'),
-                    duration: Duration(seconds: 5),
-                  ),
-                );
-                
-                // Ritarda la chiusura per permettere all'utente di vedere il messaggio
-                Future.delayed(const Duration(seconds: 1), () {
-                  if (Navigator.canPop(context)) {
-                    Navigator.of(context).pop();
-                  }
-                });
-              }
+              // Informiamo l'utente che stiamo procedendo solo con i dati Silver già disponibili
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Procedendo solo con i dati Silver già disponibili, ignorando i nuovi file.'),
+                  duration: Duration(seconds: 5),
+                ),
+              );
+              
+              // Chiudiamo il dialogo immediatamente
+              Navigator.of(context).pop();
             },
           ),
         
@@ -1041,20 +1043,6 @@ class _SearchPageState extends State<SearchPage> {
               ],
             ),
           ),
-          actions: <Widget>[
-            TextButton(
-              child: Text('Procedi'),
-              onPressed: () {
-                Navigator.of(context).pop(true);
-              },
-            ),
-            TextButton(
-              child: Text('Annulla'),
-              onPressed: () {
-                Navigator.of(context).pop(false);
-              },
-            ),
-          ],
         );
       },
     );
@@ -1980,8 +1968,11 @@ class _SearchPageState extends State<SearchPage> {
     DataOrchestrationService service,
     List<Map<String, dynamic>> remainingFiles,
     List<String> alreadyProcessedUris,
-    [bool isDialogActive = true] // Parametro per sapere se il dialogo è attivo
+    [bool isDialogActive = true]
   ) async {
+    // Questo metodo non dovrebbe essere chiamato quando si preme Skip
+    if (_skipRequested) return;
+    
     // Elabora il resto dei file in background
     List<String> additionalUris = [];
     
@@ -1993,7 +1984,7 @@ class _SearchPageState extends State<SearchPage> {
         if (mounted) {
           setState(() {
             int index = _filesToProcess.indexWhere((item) => item['path'] == fileInfo['path']);
-            if (index >= 0) {
+            if (index >= 0) {  // Corretto l'errore di sintassi qui
               // Imposta prima i file precedenti a success se erano in processing
               for (int j = 0; j < index; j++) {
                 if (_filesToProcess[j]['status'] == 'processing') {
@@ -2008,7 +1999,7 @@ class _SearchPageState extends State<SearchPage> {
         
         final result = await service.transformBronzeToSilver(
           fileInfo['path'],
-          skipDataplex: true
+          skipDataplex: true  // Sempre true per la scansione collettiva
         );
         
         if (result != null && 
