@@ -348,6 +348,7 @@ class DataOrchestrationService {
     while (true) {
       final tables = await _bigQueryService.getTables("silver_zone");
       dev.log("Tables fetched: $tables");
+      // Stampo
 
       bool allTablesFound = true;
       for (String fullTableName in finalTableNames) {

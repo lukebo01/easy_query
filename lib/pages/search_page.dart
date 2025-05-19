@@ -219,6 +219,11 @@ class _SearchPageState extends State<SearchPage> {
         tableNames,
         sampleData,
       );
+
+      // Inserisco in tableNames l'elenco di contextAnalysis['relevant_tables']
+      tableNames = (contextAnalysis['relevant_tables'] as List?)
+          ?.map((item) => item.toString())
+          ?.toList() ?? [];
       
       // Estrai i file suggeriti per la trasformazione
       final List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
