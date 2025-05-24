@@ -4,7 +4,7 @@ import datetime
 import json
 import pandas as pd
 from google.cloud import storage
-from google.cloud import dataplex_v1
+from google.cloud import vision
 import functions_framework
 from flask import Request, jsonify # Per il type hint di request,
 import io # Per BytesIO
@@ -22,6 +22,7 @@ import google.api_core.exceptions
 from google.protobuf import field_mask_pb2
 # Aggiungiamo l'import di BigQuery
 from google.cloud import bigquery
+from pdf2image import convert_from_path
 
 
 
@@ -162,67 +163,6 @@ def determine_silver_path_components(file_path_in_bronze: str, file_extension: s
     # Pulisci il percorso rimuovendo componenti vuoti
     return [part for part in path_components if part]
 
-def process_pdf(tmp_filename: str) -> pd.DataFrame:
-    """Elabora un file PDF estraendo testo e metadata."""
-    text_content = ""
-    page_count = 0
-    try:
-        with open(tmp_filename, 'rb') as f:
-            pdf_reader = PyPDF2.PdfReader(f)
-            page_count = len(pdf_reader.pages)
-            for page_num in range(page_count):
-                page = pdf_reader.pages[page_num]
-                page_text = page.extract_text()
-                if page_text: # Aggiungi solo se c'è testo estratto
-                    text_content += page_text.strip() + "\n\n" # Aggiungi newline doppio per separare pagine
-
-        return pd.DataFrame([{
-            "content_type_processed": "application/pdf",
-            "extracted_text": text_content.strip(), # Rimuovi spazi extra alla fine
-            "pdf_page_count": page_count,
-            "deep_processed_ok": True # Boolean
-        }])
-    except Exception as e:
-        print(f"Error processing PDF '{tmp_filename}': {e}")
-        traceback.print_exc()
-        return pd.DataFrame([{"error_processing_pdf": str(e), "deep_processed_ok": False}]) # Boolean
-
-def process_image(tmp_filename: str, file_ext_original: str) -> pd.DataFrame:
-    """Elabora un'immagine estraendo metadati di base e immagine in base64."""
-    try:
-        img = Image.open(tmp_filename)
-        img_metadata = {
-            "width": img.width,
-            "height": img.height,
-            "format_original": img.format,
-            "mode": img.mode,
-        }
-
-        buffered = io.BytesIO() # Usare io.BytesIO
-        # Salva in un formato web-friendly come PNG per base64
-        save_format_for_b64 = 'PNG' if img.format != 'PNG' else img.format # Mantieni PNG se è già PNG
-        if img.mode == 'P': # Converti palette in RGBA per evitare problemi con alcuni formati come GIF in PNG
-            img = img.convert('RGBA')
-        elif img.mode == 'CMYK': # Converti CMYK in RGB
-             img = img.convert('RGB')
-
-        img.save(buffered, format=save_format_for_b64)
-        img_str_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-        return pd.DataFrame([{
-            "content_type_processed": f"image/{save_format_for_b64.lower()}",
-            "image_width": img_metadata["width"], # Int
-            "image_height": img_metadata["height"], # Int
-            "image_format_original": img_metadata["format_original"],
-            "image_mode": img_metadata["mode"],
-            "image_data_b64": img_str_b64, # Stringa Base64
-            "deep_processed_ok": True # Boolean
-        }])
-    except Exception as e:
-        print(f"Error processing image '{tmp_filename}': {e}")
-        traceback.print_exc()
-        return pd.DataFrame([{"error_processing_image": str(e), "deep_processed_ok": False}]) # Boolean
-
 # --- FUNZIONI DI PROCESSAMENTO PER TIPO DI FILE ---
 def process_file_by_type(file_path, file_extension, content_type, file_size, original_file_name):
     """
@@ -262,13 +202,219 @@ def process_file_by_type(file_path, file_extension, content_type, file_size, ori
     
     return df_processed
 
-def _process_text_file(file_path):
+# -- METODI PER IL PROCESSING DI FILES .TXT --
+
+# Funzione per normalizzare i nomi delle colonne in snake_case
+def normalize_column_name(col: str) -> str:
+    # Rimuove spazi iniziali/finali
+    col = col.strip()
+    # Minuscolo + rimpiazza spazi e simboli con "_"
+    col = re.sub(r"[^\w]+", "_", col.lower())
+    # Rimuove "_" in eccesso all'inizio/fine
+    col = re.sub(r"^_+|_+$", "", col)
+    return col
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [normalize_column_name(col) for col in df.columns]
+    return df
+
+# Funzione per inferire il tipo di dato da una stringa (per creare un filoe .Parquet con tipi corretti)
+def infer_type(value: str):
+    if value.lower() in ['true', 'false']:
+        return bool
+    try:
+        int(value)
+        return int
+    except ValueError:
+        pass
+    try:
+        float(value)
+        return float
+    except ValueError:
+        pass
+    return str
+
+def infer_column_types(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        df[col] = cast_column(df[col])
+    return df
+
+# Funzione per convertire una intera colonna in un tipo coerente basandosi sull'inferenza dei tipi
+def cast_column(series: pd.Series):
+    non_nulls = series.dropna().astype(str)
+    inferred_types = [infer_type(v) for v in non_nulls]
+
+    if not inferred_types:
+        return series.astype(str)  # Tutti NaN
+    # Tipo più "dominante"
+    if all(t == bool for t in inferred_types):
+        return series.astype(bool)
+    elif all(t in [int, bool] for t in inferred_types):
+        return pd.to_numeric(series, errors='coerce').astype("Int64")  # int nullable
+    elif all(t in [float, int, bool] for t in inferred_types):
+        return pd.to_numeric(series, errors='coerce')
+    else:
+        return series.astype(str)
+
+# Funzione per rilevare il formato del file (tabellare o dizionario) in base al contenuto
+def detect_format(lines: list[str]) -> str:
+    # Dizionario: molte righe con ":" e righe vuote
+    dict_lines = sum(1 for l in lines if ':' in l)
+    blank_lines = sum(1 for l in lines if l.strip() == '')
+    
+    # Tabellare: la prima riga ha più "parole", le successive anche
+    first_line_words = len(lines[0].strip().split())
+    consistent_rows = all(len(l.strip().split()) >= first_line_words for l in lines[1:3])
+
+    if dict_lines >= len(lines) * 0.3 and blank_lines >= 1:
+        return 'dictionary'
+    elif consistent_rows:
+        return 'table'
+    return 'unknown'
+
+# Funzione per analizzare lo stile dizionario (es. "Chiave: Valore") in un file di testo
+def parse_dictionary_style(lines: list[str]) -> list[dict]:
+    records = []       # Lista finale dei record (ogni record sarà un dizionario)
+    current = {}       # Dizionario temporaneo per costruire un record
+
+    for line in lines:
+        line = line.strip()  # Rimuove spazi all'inizio/fine riga
+
+        if not line:  # Se la riga è vuota, significa che un blocco è finito
+            if current:              # Se il blocco contiene dati
+                records.append(current)  # Lo aggiunge alla lista dei record
+                current = {}             # E ricomincia da capo
+        else:
+            # Cerca la struttura "Chiave: Valore"
+            match = re.match(r"([\w\s]+):\s*(.*)", line)
+            if match:
+                key, value = match.groups()       # Estrae chiave e valore
+                current[key.strip()] = value.strip()  # Salva nel dizionario
+
+    if current:  # Aggiunge l'ultimo blocco se non è stato ancora salvato
+        records.append(current)
+
+    return records  # Restituisce la lista di dizionari
+
+# Funzione per analizzare lo stile tabellare (es. CSV o TSV) in un file di testo
+def parse_table_style(lines: list[str]) -> list[dict]:
+    header_line = lines[0].strip()  # Prima riga = intestazioni colonna
+    # Divide gli header usando: due o più spazi OPPURE tabulazioni
+    headers = re.split(r'\s{2,}|\t+', header_line)
+
+    records = []  # Lista dei record finali
+
+    for line in lines[1:]:  # Scorre tutte le righe successive agli header
+        if not line.strip():  # Salta righe vuote
+            continue
+        # Prova a dividere la riga con spazi multipli o tab (non spazi singoli perché potrebbero essere di una singola colonna)
+        values = re.split(r'\s{2,}|\t+', line.strip())
+
+        if len(values) < len(headers):
+            # Se il numero di colonne è inferiore al numero degli header
+            # Forse sono separati solo da uno spazio. Si prova con split normale.
+            values = re.split(r'\s+', line.strip())
+
+        # Combina header e valori in un dizionario
+        record = dict(zip(headers, values))
+        records.append(record)
+
+    return records  # Restituisce la lista dei dizionari
+
+def process_text_file(file_path):
     """Elabora un file di testo semplice."""
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f_txt:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    fmt = detect_format(lines)
+
+    if fmt == 'dictionary':
+        # Prova a interpretare come dizionario (es. "Chiave: Valore")
+        records = parse_dictionary_style(lines)
+    elif fmt == 'table':
+        # Prova a interpretare come tabella (CSV/TSV)
+        records = parse_table_style(lines)
+    else: 
+        # Fallback a un singolo record con testo completo
         return pd.DataFrame([{
-            "extracted_text": f_txt.read(), 
+            "extracted_text": f.read(), 
             "deep_processed_ok": True
         }])
+
+    df = pd.DataFrame(records)
+    df = normalize_columns(df)
+    df = infer_column_types(df)
+    
+    return df
+
+# -- METODI PER IL PROCESSING DI FILES DI IMMAGINI E PDF --
+
+# Metodo per l'OCR delle immagini (utilizziamo Google Cloud Vision API)
+def ocr_image_to_text(image_path: str) -> None:
+    # Configura le credenziali (può anche essere fatto via variabile d'ambiente)
+    client = vision.ImageAnnotatorClient.from_service_account_json("credentials.json")
+
+    # Carica l'immagine
+    with io.open(image_path, 'rb') as image_file:
+        content = image_file.read()
+
+    image = vision.Image(content=content)
+    response = client.text_detection(image=image)
+    
+    if response.error.message:
+        raise Exception(f"Errore OCR: {response.error.message}")
+
+    text = response.full_text_annotation.text
+
+    # Salva il testo rilevato in file .txt
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode='w', encoding='utf-8') as tmp_txt:
+        tmp_txt.write(text)
+        return tmp_txt.name  # Path del file temporaneo
+
+def process_image(tmp_filename: str) -> pd.DataFrame:
+    """Elabora un'immagine con OCR e ritorna un DataFrame tipizzato."""
+    tmp_txt_path = ocr_image_to_text(tmp_filename)
+
+    try:
+        return process_text_file(tmp_txt_path)
+    finally:
+        os.remove(tmp_txt_path)
+
+# Metodo per l'OCR di PDF (anche multi-pagina)
+def ocr_pdf_to_text(pdf_path: str) -> None:
+    client = vision.ImageAnnotatorClient.from_service_account_json("credentials.json")
+    pages = convert_from_path(pdf_path, dpi=300)
+    all_text = []
+
+    for i, page in enumerate(pages):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+            page.save(tmp_img.name, format="PNG")
+
+            with open(tmp_img.name, "rb") as f:
+                image = vision.Image(content=f.read())
+                response = client.text_detection(image=image)
+
+                if response.error.message:
+                    raise Exception(f"OCR error on page {i+1}: {response.error.message}")
+
+                all_text.append(response.full_text_annotation.text)
+
+            os.unlink(tmp_img.name)
+
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode='w', encoding='utf-8') as tmp_txt:
+        tmp_txt.write("\n".join(all_text))
+        return tmp_txt.name  # Ritorna il path al file temporaneo .txt
+
+def process_pdf(tmp_filename: str) -> pd.DataFrame:
+    """Elabora un file PDF estraendo testo e ritornando un DataFrame tipizzato."""
+    tmp_txt_path = ocr_pdf_to_text(tmp_filename)
+
+    try:
+        return process_text_file(tmp_txt_path)
+    finally:
+        os.remove(tmp_txt_path)
+
+# -- METODI PER IL PROCESSING DI FILES .CSV e .TSV --
 
 def _process_tabular_file(file_path, file_extension):
     """Elabora un file CSV o TSV con gestione robusta di vari formati."""
@@ -352,6 +498,8 @@ def _process_tabular_file(file_path, file_extension):
         "error_description": "Failed to parse tabular file after multiple attempts with different settings"
     }])
 
+# -- METODI PER IL PROCESSING DI FILES STRUTTURATI .JSON . JSONL .Parquet e Excel --
+
 def _process_json_file(file_path):
     """Elabora un file JSON."""
     try:
@@ -381,6 +529,8 @@ def _process_excel_file(file_path):
     df = pd.read_excel(file_path, engine=None)
     df["deep_processed_ok"] = True
     return df
+
+# -- METODO DI FALLBACK --
 
 def _process_unsupported_file(content_type, file_size, file_name, file_extension):
     """Crea un DataFrame con i metadati per file di tipo non supportato."""
