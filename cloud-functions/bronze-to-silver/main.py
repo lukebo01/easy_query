@@ -22,7 +22,7 @@ import google.api_core.exceptions
 from google.protobuf import field_mask_pb2
 # Aggiungiamo l'import di BigQuery
 from google.cloud import bigquery
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF
 
 
 
@@ -182,7 +182,7 @@ def process_file_by_type(file_path, file_extension, content_type, file_size, ori
     
     # Elabora in base al tipo di file
     if file_extension == "txt":
-        df_processed = _process_text_file(file_path)
+        df_processed = process_text_file(file_path)
     elif file_extension in ["csv", "tsv"]:
         df_processed = _process_tabular_file(file_path, file_extension)
     elif file_extension == "json":
@@ -196,7 +196,7 @@ def process_file_by_type(file_path, file_extension, content_type, file_size, ori
     elif file_extension == "pdf":
         df_processed = process_pdf(file_path)
     elif file_extension in ["jpg", "jpeg", "png", "gif", "tiff", "bmp", "webp", "svg"]:
-        df_processed = process_image(file_path, file_extension)
+        df_processed = process_image(file_path)
     else:
         df_processed = _process_unsupported_file(content_type, file_size, original_file_name, file_extension)
     
@@ -323,8 +323,12 @@ def parse_table_style(lines: list[str]) -> list[dict]:
 
 def process_text_file(file_path):
     """Elabora un file di testo semplice."""
+    full_text = ""
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
+        f.seek(0)
+        full_text = f.read()  # Legge tutto il testo
+        
 
     fmt = detect_format(lines)
 
@@ -337,7 +341,7 @@ def process_text_file(file_path):
     else: 
         # Fallback a un singolo record con testo completo
         return pd.DataFrame([{
-            "extracted_text": f.read(), 
+            "extracted_text": full_text,
             "deep_processed_ok": True
         }])
 
@@ -352,7 +356,7 @@ def process_text_file(file_path):
 # Metodo per l'OCR delle immagini (utilizziamo Google Cloud Vision API)
 def ocr_image_to_text(image_path: str) -> None:
     # Configura le credenziali (può anche essere fatto via variabile d'ambiente)
-    client = vision.ImageAnnotatorClient.from_service_account_json("credentials.json")
+    client = vision.ImageAnnotatorClient()
 
     # Carica l'immagine
     with io.open(image_path, 'rb') as image_file:
@@ -381,29 +385,48 @@ def process_image(tmp_filename: str) -> pd.DataFrame:
         os.remove(tmp_txt_path)
 
 # Metodo per l'OCR di PDF (anche multi-pagina)
-def ocr_pdf_to_text(pdf_path: str) -> None:
-    client = vision.ImageAnnotatorClient.from_service_account_json("credentials.json")
-    pages = convert_from_path(pdf_path, dpi=300)
+def ocr_pdf_to_text(pdf_path: str) -> str:
+    """Estrae testo da un PDF usando PyMuPDF e Vision AI per OCR completo"""
+    client = vision.ImageAnnotatorClient()
     all_text = []
-
-    for i, page in enumerate(pages):
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
-            page.save(tmp_img.name, format="PNG")
-
-            with open(tmp_img.name, "rb") as f:
-                image = vision.Image(content=f.read())
-                response = client.text_detection(image=image)
-
-                if response.error.message:
-                    raise Exception(f"OCR error on page {i+1}: {response.error.message}")
-
-                all_text.append(response.full_text_annotation.text)
-
-            os.unlink(tmp_img.name)
-
+    
+    try:
+        # Usa PyMuPDF (fitz) per rendere le pagine PDF come immagini
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(len(doc)):
+            # Renderizza ogni pagina ad alta risoluzione
+            page = doc[page_num]
+            print(f"Elaborazione pagina {page_num+1}/{len(doc)}")
+            
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
+                # Renderizza la pagina con alta risoluzione per migliore OCR
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                pix.save(img_file.name)
+                
+                # Usa Vision API per OCR sull'immagine
+                with open(img_file.name, "rb") as f:
+                    image = vision.Image(content=f.read())
+                    response = client.text_detection(image=image)
+                    
+                    if response.error.message:
+                        raise Exception(f"OCR error on page {page_num+1}: {response.error.message}")
+                    
+                    ocr_text = response.full_text_annotation.text
+                    if ocr_text:
+                        all_text.append(ocr_text)
+                
+                # Elimina il file temporaneo
+                os.unlink(img_file.name)
+    
+    except Exception as e:
+        print(f"Errore nell'elaborazione del PDF: {e}")
+        all_text.append(f"Errore nell'elaborazione del PDF: {e}")
+    
+    # Salva il risultato in un file temporaneo
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode='w', encoding='utf-8') as tmp_txt:
         tmp_txt.write("\n".join(all_text))
-        return tmp_txt.name  # Ritorna il path al file temporaneo .txt
+        return tmp_txt.name
 
 def process_pdf(tmp_filename: str) -> pd.DataFrame:
     """Elabora un file PDF estraendo testo e ritornando un DataFrame tipizzato."""
