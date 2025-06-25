@@ -20,19 +20,8 @@ class GeminiFlashService {
     String databaseSchema,
     String cloudFilesAndMetadata,
     List<String> tableNames,
-    Map<String, List<Map<String, dynamic>>> sampleData,
+    Map<String, List<Map<String, dynamic>>>? sampleData,
   ) async {
-    // Converti sampleData in una stringa JSON leggibile
-    String sampleDataStr = '';
-    sampleData.forEach((table, data) {
-      if (data.isNotEmpty) {
-        sampleDataStr += 'Table: $table\n';
-        sampleDataStr += 'Sample rows (${data.length}):\n';
-        sampleDataStr +=
-            '${data.take(5).map((row) => row.toString()).join('\n')}\n\n';
-      }
-    });
-
     final payload = {
       'contents': [
         {
@@ -47,7 +36,7 @@ class GeminiFlashService {
               
               Database schemas: $databaseSchema
               
-              Sample data from tables: $sampleDataStr
+              Sample data from tables: $sampleData
               
               Analyze the question, database schemas, cloud files and sample data thoroughly, then:
               1. Identify ALL tables that could be relevant to the user's question (be inclusive rather than exclusive)
@@ -241,10 +230,37 @@ class GeminiFlashService {
     }
   }
 
+  /// Traduci in inglese un testo in italiano
+  Future<String> translateToEnglish(String italianText) async {
+    try {
+      // Build prompt for the LLM
+      final prompt = '''
+      Sei un traduttore esperto. Il tuo compito è tradurre il seguente testo dall'italiano all'inglese mantenendo il significato
+      originale e utilizzando un linguaggio naturale fluente.
+
+      Testo in italiano: $italianText
+
+      Rispondi solo con la traduzione in inglese senza aggiungere altro testo.
+      ''';
+
+      // Get response from LLM
+      final response = await generateText(
+        prompt,
+        temperature: 0.2,
+        topP: 0.9,
+        topK: 40,
+      );
+      return response;
+    } catch (e) {
+      dev.log('Error translating to English: $e', error: e);
+      throw Exception('Failed to translate to English: $e');
+    }
+  }
+
   /* -- AI AGENTS PIPELINE FOR QUERY GENERATION -- */
 
   /// Analyze user intent from a natural language question
-  Future<Map<String, dynamic>> analyzeIntent(String userQuestion) async {
+  Future<String> analyzeIntent(String userQuestion) async {
     try {
       // Build prompt for the LLM
       final prompt = '''
@@ -275,7 +291,7 @@ class GeminiFlashService {
   /// Suggest bronze files based on user intent and metadata
   Future<Map<String, dynamic>> suggestBronzeFiles(
     String userIntent,
-    String bronzeMetadata,
+    List<Map<String, dynamic>> bronzeMetadata,
   ) async {
     try {
       // Build prompt for the LLM
@@ -311,17 +327,19 @@ class GeminiFlashService {
   }
 
   /// Suggest gold and silver schemas based on user intent and existing schemas
-  Future<Map<String, dynamic>> goldAndSilverDiscovery(
+  Future<List<Map<String, dynamic>>> goldAndSilverDiscovery(
     String userIntent,
-    String silverSchemas,
-    String goldSchemas,
+    List<Map<String, dynamic>> goldAndSilverSchemas,
+    Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
   ) async {
     try {
       // Build prompt for the LLM
       final prompt = '''
       Sei un esperto di Big Data e data lineage. Ti sono state suggerite delle tabelle (con schemas e prime ennuple) da valutare,
-      il tuo compito è individuare quali tabelle sono utili per soddisfare gli intenti dell'utente. Prima di suggerire una tabella Silver
-      controlla se questa abbia versioni più recenti o versioni Gold, in quel caso preferisci le altre versioni.
+      il tuo compito è individuare quali tabelle sono utili per soddisfare gli intenti dell'utente.
+      
+      Prima di suggerire una tabella Silver controlla se questa abbia versioni più recenti o versioni Gold,
+      in quel caso preferisci le altre versioni.
 
       Rispondi solo con un output strutturato contenente i nomi delle tabelle suggerite nella forma:
 
@@ -330,9 +348,9 @@ class GeminiFlashService {
 
       User Intent: $userIntent
 
-      Silver Schemas: $silverSchemas
+      Gold and Silver Schemas: $goldAndSilverSchemas
 
-      Gold Schemas: $goldSchemas
+      Gold and Silver Samples: $goldAndSilverSamples
       ''';
 
       // Get response from LLM
@@ -353,22 +371,23 @@ class GeminiFlashService {
   /// Plan a query based on user intent and selected schemas
   Future<String> planQuery(
     String userIntent,
-    String selectedSilverSchemas,
-    String selectedGoldSchemas,
+    Map<String, dynamic> selectedSchemas,
   ) async {
     try {
       // Build prompt for the LLM
       final prompt = '''
-      Sei un architetto dati. Ricevi gli intenti utente e una lista di tabelle Silver e Gold rilevanti con i loro schemi.
+      Sei un architetto di dati. Ricevi gli intenti utente e una lista di tabelle Silver e Gold rilevanti con i loro schemi.
       Definisci un piano per una query SQL BigQuery: quali tabelle usare, join logici, filtri, e aggregazioni.
+
+      Individua connessioni semantiche tra le colonne esaminando sia i nomi delle colonne che i valori effettivi dei dati.
+
+      Considera il fuzzy matching tra valori simili in diverse tabelle (ad esempio, "Elettronica" in una tabella potrebbe corrispondere a "Dispositivi Elettronici" in un'altra).
 
       Rispondi solo con una spiegazione chiara in linguaggio naturale.
 
       User Intent: $userIntent
 
-      Selected Silver Schemas: $selectedSilverSchemas
-
-      Selected Gold Schemas: $selectedGoldSchemas
+      Selected table Schemas: $selectedSchemas
       ''';
 
       // Get response from LLM
@@ -390,8 +409,7 @@ class GeminiFlashService {
   Future<String> buildQuery(
     String userIntent,
     String plannedQuery,
-    String selectedSilverSchemas,
-    String selectedGoldSchemas,
+    Map<String, dynamic> selectedSchemas,
   ) async {
     try {
       // Build prompt for the LLM
@@ -405,6 +423,8 @@ class GeminiFlashService {
       User Intent: $userIntent
 
       Planned Query: $plannedQuery
+
+      Selected table Schemas: $selectedSchemas
       ''';
 
       // Get response from LLM
@@ -423,9 +443,9 @@ class GeminiFlashService {
   }
 
   /// Validate the SQL query against the database schema
-  Future<Map<String, dynamic>> validateSchemasAndCorrectQuery(
+  Future<String> validateSchemasAndCorrectQuery(
     String sqlQuery,
-    String selectedDatabaseSchemas,
+    Map<String, dynamic> selectedDatabaseSchemas,
   ) async {
     try {
       // Build prompt for the LLM
@@ -465,7 +485,14 @@ class GeminiFlashService {
     try {
       // Build prompt for the LLM
       final prompt = '''
-      Sei un esperto di SQL e di BigQuery. Ricevi una query SQL e il tuo compito è quello di correggere eventuali errori di sintassi.
+      Sei un esperto di SQL e di BigQuery. Ricevi una query SQL e il tuo compito è quello di correggere eventuali errori di sintassi e di migliorare
+      la qualità della query.
+
+      Assicurati che la query sia conforme agli standard di BigQuery e che utilizzi le migliori pratiche.
+
+      Racchiudi ogni nome di tabella e colonna tra backtick (``) per evitare conflitti con parole chiave riservate.
+
+      Formatta le date e i timestamp in modo appropriato e utilizza le funzioni corrette per la manipolazione dei testi.
 
       Rispondi soltanto con la query SQL corretta.
 

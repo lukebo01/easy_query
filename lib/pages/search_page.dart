@@ -93,21 +93,43 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
-
-
   Future<void> _processQuestion(String question) async {
+    // Controlla se il messaggio è vuoto
     if (question.trim().isEmpty) {
       if (mounted) {
-        setState(() { _errorMessage = 'Please enter a question'; });
+        setState(() {
+          _errorMessage = 'Please enter a question';
+        });
       }
       return;
     }
 
+    // Reset esplicito delle liste per ogni nuova query
+    List<Map<String, dynamic>> cloudFilesMetadata = [];
+    bool dataplexWasSkipped = false;
+    List<Map<String, dynamic>> schemas = [];
+    List<String> tableNames = [];
+    Map<String, List<Map<String, dynamic>>> sampleData = {};
+
+    // Inizializza il servizio di orchestrazione dei dati
+    final dataOrchestrationService = DataOrchestrationService(
+      geminiService: widget.geminiService,
+      bigQueryService: widget.bigQueryService,
+      cloudStorageService: widget.cloudStorageService,
+      bronzeToSilverUrl:
+          'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/bronze-to-silver',
+      silverToGoldUrl:
+          'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
+      batchDataplexScanUrl:
+          'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/batch-dataplex-scan',
+    );
+
+    // Aggiorna lo stato per indicare che l'elaborazione è iniziata
     if (mounted) {
       setState(() {
         _isLoading = true;
         _errorMessage = '';
-        _currentExecutingQuery = 'Translating request to English...';
+        _currentExecutingQuery = 'Starting analysis...';
         // Reset stato elaborazione file
         _isProcessingFiles = false;
         _filesToProcess = [];
@@ -116,101 +138,67 @@ class _SearchPageState extends State<SearchPage> {
       });
     }
 
-    // Reset esplicito delle liste per ogni nuova query
-    List<Map<String, dynamic>> cloudFilesMetadata = []; 
-    bool dataplexWasSkipped = false;
-    List<Map<String, dynamic>> schemas = [];
-    List<String> tableNames = [];
-    Map<String, List<Map<String, dynamic>>> sampleData = {};
-
     try {
-      final projectId = widget.bigQueryService.projectId;
-      final datasets = await widget.bigQueryService.getDatasets();
-      log('List of datasets: $datasets');
-      if (datasets.isEmpty) throw Exception("No datasets found in the project.");
+      // Traduci la domanda in inglese
+      question = await widget.geminiService.translateToEnglish(question);
+      log('Translated question: $question');
 
-      final Map<String, List<String>> datasetTablesMap = {};
-      for (var datasetId in datasets) {
-        if (datasetId.toLowerCase() != 'metadata_store') {
-          final tables = await widget.bigQueryService.getTables(datasetId);
-          datasetTablesMap[datasetId] = tables;
-        }
+      if (mounted) {
+        setState(() {
+          _currentExecutingQuery = 'Translating text to english...';
+        });
       }
-      log('Dataset to tables mapping: $datasetTablesMap');
 
-
-      // Recupera prima i metadati bronze, potrebbero servire per derivare partizioni campione
+      // Recupera i metadati bronze
       cloudFilesMetadata = await widget.bigQueryService.getBronzeMetadata();
       log('Cloud files metadata (bronze): ${jsonEncode(cloudFilesMetadata)}');
 
-      for (var entry in datasetTablesMap.entries) {
-        final targetDataset = entry.key;
-        final tablesInDataset = entry.value;
-        for (var tableIdInDataset in tablesInDataset) {
-          final fullTableName = '$projectId.$targetDataset.$tableIdInDataset';
-          try {
-            final schemaJson = await widget.bigQueryService.getTableSchema(targetDataset, tableIdInDataset);
-            final Map<String, dynamic> schemaMap = jsonDecode(schemaJson);
-            schemas.add(schemaMap); // schemaMap è già un Map<String, dynamic>
-            tableNames.add(fullTableName);
+      // Recupera le tabelle Silver e Gold
+      Map<String, List<String>> datasetTablesMap =
+          await dataOrchestrationService.getSilverAndGoldTables();
 
-            // MODIFICA: Usa TABLESAMPLE invece di filtri di partizione per tutte le tabelle
-            // per evitare completamente problemi con partizioni Hive
-            String sampleQuery;
-            
-            if (targetDataset == 'silver_zone') {
-              // Per tabelle silver_zone, usa LIMIT senza filtri di partizione
-              sampleQuery = "SELECT * FROM `$fullTableName` LIMIT 15";
-              log("Using simple LIMIT query for silver_zone table $fullTableName to avoid partition issues");
-            } else {
-              // Per altre tabelle usa TABLESAMPLE
-              sampleQuery = "SELECT * FROM `$fullTableName` TABLESAMPLE SYSTEM (1 PERCENT) LIMIT 15";
-            }
-            
-            try {
-              final tableSample = await widget.bigQueryService.executeQuery(sampleQuery);
-              sampleData[fullTableName] = tableSample;
-            } catch (e) {
-              log('Warning: Failed to get sample data from $fullTableName (Query: $sampleQuery). Error: $e');
-              
-              // Se fallisce con la query principale, prova un fallback con solo LIMIT
-              if (targetDataset == 'silver_zone') {
-                try {
-                  final fallbackQuery = "SELECT * FROM `$fullTableName` LIMIT 5";
-                  log("Trying fallback query for $fullTableName: $fallbackQuery");
-                  final fallbackSample = await widget.bigQueryService.executeQuery(fallbackQuery);
-                  sampleData[fullTableName] = fallbackSample;
-                  log("Fallback query successful for $fullTableName");
-                } catch (fallbackError) {
-                  log('Failed fallback query for $fullTableName: $fallbackError');
-                  sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
-                }
-              } else {
-                sampleData[fullTableName] = []; // Inizializza a lista vuota in caso di errore
-              }
-            }
-          } catch (e) {
-            log('Warning: Failed to get schema for table $fullTableName. Skipping. Error: $e');
-          }
-        }
-      }
-      log('Table schemas fetched: ${schemas.length}');
-      log('Sample data fetched for ${sampleData.keys.length} tables');
-      
-      
-      final dataOrchestrationService = DataOrchestrationService(
-        geminiService: widget.geminiService,
-        bigQueryService: widget.bigQueryService,
-        cloudStorageService: widget.cloudStorageService,
-        bronzeToSilverUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/bronze-to-silver',
-        silverToGoldUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold',
-        batchDataplexScanUrl: 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/batch-dataplex-scan',
+      // Ottieni nomi delle tabelle, schemi e i dati di esempio per le tabelle Silver e Gold
+      final schemaData = await dataOrchestrationService.initializeTableMaps(
+        datasetTablesMap,
       );
 
+      tableNames = schemaData['tableNames'];
+      schemas = schemaData['schemas'];
+      sampleData = schemaData['sampleData'];
+
       if (mounted) {
-        setState(() { _currentExecutingQuery = 'Starting Data Transformation pipeline...'; });
+        setState(() {
+          _currentExecutingQuery = 'Starting Data Transformation pipeline...';
+        });
       }
-      
+
+      // Ottieni l'intento dell'utente dalla domanda in linguaggio naturale
+      String userIntent = await dataOrchestrationService.getUserIntent(
+        question,
+      );
+
+      // Dai il via al processo di data transformation
+      Map<String, dynamic> selectedAndUpdatedSchemasMap =
+          await dataOrchestrationService.dataTransformationPipeline(
+            userIntent,
+            schemas,
+            sampleData,
+            cloudFilesMetadata,
+          );
+
+      if (mounted) {
+        setState(() {
+          _currentExecutingQuery = 'Building optimized query...';
+        });
+      }
+
+      // Dai il via al processo di creazione della query
+      String sqlQuery = await dataOrchestrationService.queryBuildingPipeline(
+        userIntent,
+        selectedAndUpdatedSchemasMap,
+      );
+
+      /// CODICE VECCHIO IN GIU'
       // Ottieni i risultati iniziali dell'analisi del contesto
       final contextAnalysis = await widget.geminiService.analyzeQueryContext(
         question,
@@ -221,50 +209,62 @@ class _SearchPageState extends State<SearchPage> {
       );
 
       // Inserisco in tableNames l'elenco di contextAnalysis['relevant_tables']
-      tableNames = (contextAnalysis['relevant_tables'] as List?)
-          ?.map((item) => item.toString())
-          ?.toList() ?? [];
-      
+      tableNames =
+          (contextAnalysis['relevant_tables'] as List?)
+              ?.map((item) => item.toString())
+              ?.toList() ??
+          [];
+
       // Estrai i file suggeriti per la trasformazione
-      final List<dynamic>? suggestedFilesRaw = contextAnalysis['suggested_files'] as List<dynamic>?;
-      final List<String> filesToTransformBronze = suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
-      
+      final List<dynamic>? suggestedFilesRaw =
+          contextAnalysis['suggested_files'] as List<dynamic>?;
+      final List<String> filesToTransformBronze =
+          suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
+
       // NUOVO: Estrai anche i file già elaborati
-      final List<dynamic> alreadyProcessedFilesRaw = contextAnalysis['already_processed_files'] as List<dynamic>? ?? [];
-      final List<Map<String, dynamic>> alreadyProcessedFiles = alreadyProcessedFilesRaw
-          .where((item) => item is Map<String, dynamic>)
-          .map((item) => item as Map<String, dynamic>)
-          .toList();
-      
+      final List<dynamic> alreadyProcessedFilesRaw =
+          contextAnalysis['already_processed_files'] as List<dynamic>? ?? [];
+      final List<Map<String, dynamic>> alreadyProcessedFiles =
+          alreadyProcessedFilesRaw
+              .where((item) => item is Map<String, dynamic>)
+              .map((item) => item as Map<String, dynamic>)
+              .toList();
+
       // Se ci sono file già elaborati, mostra un messaggio informativo
       if (alreadyProcessedFiles.isNotEmpty) {
         if (mounted) {
           setState(() {
-            _currentExecutingQuery = 'Utilizzando tabelle silver esistenti da file già elaborati...';
+            _currentExecutingQuery =
+                'Utilizzando tabelle silver esistenti da file già elaborati...';
           });
         }
-        
+
         // Mostra un dialogo informativo se ci sono file già elaborati
         if (mounted) {
           _showAlreadyProcessedFilesDialog(alreadyProcessedFiles);
         }
       }
-      
+
       // Aggiorna l'UI se ci sono file da elaborare
       if (filesToTransformBronze.isNotEmpty) {
         // Preparare la lista di file da elaborare per tracciare lo stato
         if (mounted) {
           setState(() {
             _isProcessingFiles = true;
-            _filesToProcess = filesToTransformBronze.map((filePath) => {
-              'path': filePath,
-              'status': 'pending',
-              'message': '',
-              'silver_path': '',
-            }).toList();
+            _filesToProcess =
+                filesToTransformBronze
+                    .map(
+                      (filePath) => {
+                        'path': filePath,
+                        'status': 'pending',
+                        'message': '',
+                        'silver_path': '',
+                      },
+                    )
+                    .toList();
           });
         }
-        
+
         // Mostra il dialogo di elaborazione con lo stato iniziale
         BuildContext? dialogContext;
         showDialog(
@@ -275,47 +275,54 @@ class _SearchPageState extends State<SearchPage> {
             return _buildProcessingDialog(context);
           },
         );
-        
+
         // Usa la versione migliorata di analyzeQueryAndPrepareData che supporta callback di stato
-        final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
-          question, schemas, tableNames, sampleData, cloudFilesMetadata,
-          skipDataplex: true,
-          onFileStatusChange: (updatedFilesStatus) {
-            if (mounted) {
-              setState(() {
-                _filesToProcess = updatedFilesStatus;
-                
-                // Se lo skip è stato richiesto, aggiorna lo stato dei file rimanenti
-                if (_skipRequested) {
-                  for (int j = 0; j < _filesToProcess.length; j++) {
-                    if (_filesToProcess[j]['status'] == 'pending') {
-                      _filesToProcess[j]['status'] = 'skipped';
-                      _filesToProcess[j]['message'] = 'Elaborazione saltata dall\'utente';
+        final orchestrationResult = await dataOrchestrationService
+            .analyzeQueryAndPrepareData(
+              question,
+              schemas,
+              tableNames,
+              sampleData,
+              cloudFilesMetadata,
+              skipDataplex: true,
+              onFileStatusChange: (updatedFilesStatus) {
+                if (mounted) {
+                  setState(() {
+                    _filesToProcess = updatedFilesStatus;
+
+                    // Se lo skip è stato richiesto, aggiorna lo stato dei file rimanenti
+                    if (_skipRequested) {
+                      for (int j = 0; j < _filesToProcess.length; j++) {
+                        if (_filesToProcess[j]['status'] == 'pending') {
+                          _filesToProcess[j]['status'] = 'skipped';
+                          _filesToProcess[j]['message'] =
+                              'Elaborazione saltata dall\'utente';
+                        }
+                      }
                     }
+                  });
+
+                  // Aggiorna il dialogo se è attivo
+                  try {
+                    if (dialogContext != null &&
+                        Navigator.canPop(dialogContext!)) {
+                      Navigator.pop(dialogContext!);
+                      showDialog(
+                        context: context,
+                        barrierDismissible: false,
+                        builder: (BuildContext context) {
+                          dialogContext = context;
+                          return _buildProcessingDialog(context);
+                        },
+                      );
+                    }
+                  } catch (e) {
+                    print('Dialog update error: $e');
                   }
                 }
-              });
-              
-              // Aggiorna il dialogo se è attivo
-              try {
-                if (dialogContext != null && Navigator.canPop(dialogContext!)) {
-                  Navigator.pop(dialogContext!);
-                  showDialog(
-                    context: context,
-                    barrierDismissible: false,
-                    builder: (BuildContext context) {
-                      dialogContext = context;
-                      return _buildProcessingDialog(context);
-                    },
-                  );
-                }
-              } catch (e) {
-                print('Dialog update error: $e');
-              }
-            }
-          },
-        );
-        
+              },
+            );
+
         // Nasconde il dialogo quando il processo è completato
         if (mounted && dialogContext != null) {
           try {
@@ -326,9 +333,9 @@ class _SearchPageState extends State<SearchPage> {
             print('Error closing dialog: $e');
           }
         }
-        
+
         log('Orchestration result: ${jsonEncode(orchestrationResult)}');
-        
+
         // Continua con il resto della pipeline usando i risultati dell'orchestrazione
         if (mounted) {
           setState(() {
@@ -338,17 +345,25 @@ class _SearchPageState extends State<SearchPage> {
         }
 
         final contextAnalysis = orchestrationResult['contextAnalysis'];
-        final List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
-            ?.map((item) => item as Map<String, dynamic>)
-            ?.toList() ?? [];
-        final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
-            ?.map((item) => item.toString())
-            ?.toList() ?? [];
-            
+        final List<Map<String, dynamic>> updatedSchemas =
+            (orchestrationResult['updatedSchemas'] as List?)
+                ?.map((item) => item as Map<String, dynamic>)
+                ?.toList() ??
+            [];
+        final List<String> updatedTableNames =
+            (orchestrationResult['updatedTableNames'] as List?)
+                ?.map((item) => item.toString())
+                ?.toList() ??
+            [];
+
         // Controlla se Dataplex è stato saltato e ci sono nuovi file
-        final dataplexWasSkipped = orchestrationResult['dataplexWasSkipped'] == true;
-        final transformedSilverFileUris = (orchestrationResult['transformedSilverFileUris'] as List?)?.cast<String>() ?? [];
-        
+        final dataplexWasSkipped =
+            orchestrationResult['dataplexWasSkipped'] == true;
+        final transformedSilverFileUris =
+            (orchestrationResult['transformedSilverFileUris'] as List?)
+                ?.cast<String>() ??
+            [];
+
         if (dataplexWasSkipped && transformedSilverFileUris.isNotEmpty) {
           // Mostra un avviso all'utente sulla disponibilità dei dati
           _showDataplexStatusDialog(transformedSilverFileUris);
@@ -357,112 +372,185 @@ class _SearchPageState extends State<SearchPage> {
         // Procedi con la generazione della query SQL
         final sqlQuery = await widget.geminiService.generateSqlQuery(
           question,
-          jsonEncode(updatedSchemas), 
-          jsonEncode(updatedTableNames), 
+          jsonEncode(updatedSchemas),
+          jsonEncode(updatedTableNames),
           sampleData: sampleData,
           contextAnalysis: contextAnalysis,
         );
 
-        final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
-                                 .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
-                                 .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+        // Effettua un'ulteriore pulizia della query generata
+        final cleanedSqlQuery =
+            sqlQuery
+                .replaceAll('sql', ' ')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .replaceAll(RegExp(r'\n'), ' ')
+                .replaceAll('```', '')
+                .replaceAll(
+                  RegExp(r'^\s*SELECT', caseSensitive: false),
+                  'SELECT',
+                )
+                .trim();
         log('Executing SQL query from Gemini: $cleanedSqlQuery');
 
         if (mounted) {
-          setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+          setState(() {
+            _currentExecutingQuery = cleanedSqlQuery;
+          });
         }
 
-        final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
+        // Esegui la query pulita su BQ
+        final results = await widget.bigQueryService.executeQuery(
+          cleanedSqlQuery,
+        );
         log('Query Results from BQ: ${results.length} rows.');
 
         if (mounted) {
-          setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
+          setState(() {
+            _currentExecutingQuery = 'Analyzing query results...';
+          });
         }
 
-        final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
+        // Effettua l'analisi dei risultati ottenuti
+        final analysis = await widget.geminiService.analyzeQueryResults(
+          cleanedSqlQuery,
+          results,
+        );
 
         if (!mounted) return;
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (context) => ResultPage(
-            question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
-          )),
+          MaterialPageRoute(
+            builder:
+                (context) => ResultPage(
+                  question: question,
+                  sqlQuery: cleanedSqlQuery,
+                  results: results,
+                  analysis: analysis,
+                ),
+          ),
         );
       } else {
         // Nessun file da elaborare, procedi normalmente
-        final orchestrationResult = await dataOrchestrationService.analyzeQueryAndPrepareData(
-          question, schemas, tableNames, sampleData, cloudFilesMetadata,
-          // skipDataplex è sempre true, non è più un parametro per scegliere la modalità
-          skipDataplex: true,
-        );
+        final orchestrationResult = await dataOrchestrationService
+            .analyzeQueryAndPrepareData(
+              question,
+              schemas,
+              tableNames,
+              sampleData,
+              cloudFilesMetadata,
+              // skipDataplex è sempre true, non è più un parametro per scegliere la modalità
+              skipDataplex: true,
+            );
         log('Orchestration result: ${jsonEncode(orchestrationResult)}');
 
         if (mounted) {
-          setState(() { _currentExecutingQuery = 'Waiting for Dataplex scan...'; });
+          setState(() {
+            _currentExecutingQuery = 'Waiting for Dataplex scan...';
+          });
         }
 
         log('Waiting for Dataplex scan to complete...');
 
-        await dataOrchestrationService.waitForAllSilverTables(orchestrationResult['updatedTableNames']);
-        
+        await dataOrchestrationService.waitForAllSilverTables(
+          orchestrationResult['updatedTableNames'],
+        );
+
         final contextAnalysis = orchestrationResult['contextAnalysis'];
         // Assicurati che updatedSchemas e updatedTableNames siano del tipo corretto
-        List<Map<String, dynamic>> updatedSchemas = (orchestrationResult['updatedSchemas'] as List?)
-            ?.map((item) => item as Map<String, dynamic>)
-            ?.toList() ?? [];
-        final List<String> updatedTableNames = (orchestrationResult['updatedTableNames'] as List?)
-            ?.map((item) => item.toString())
-            ?.toList() ?? [];
-            
+        List<Map<String, dynamic>> updatedSchemas =
+            (orchestrationResult['updatedSchemas'] as List?)
+                ?.map((item) => item as Map<String, dynamic>)
+                ?.toList() ??
+            [];
+        final List<String> updatedTableNames =
+            (orchestrationResult['updatedTableNames'] as List?)
+                ?.map((item) => item.toString())
+                ?.toList() ??
+            [];
+
         // Controlla se Dataplex è stato saltato e ci sono nuovi file
         dataplexWasSkipped = orchestrationResult['dataplexWasSkipped'] == true;
-        final transformedSilverFileUris = (orchestrationResult['transformedSilverFileUris'] as List?)?.cast<String>() ?? [];
-        
+        final transformedSilverFileUris =
+            (orchestrationResult['transformedSilverFileUris'] as List?)
+                ?.cast<String>() ??
+            [];
+
         if (dataplexWasSkipped && transformedSilverFileUris.isNotEmpty) {
           // Mostra un avviso all'utente sulla disponibilità dei dati
           _showDataplexStatusDialog(transformedSilverFileUris);
         }
-        
+
         if (mounted) {
-          setState(() { _currentExecutingQuery = 'Building optimized query...'; });
+          setState(() {
+            _currentExecutingQuery = 'Building optimized query...';
+          });
         }
 
         final sqlQuery = await widget.geminiService.generateSqlQuery(
           question,
-          jsonEncode(updatedSchemas), 
-          jsonEncode(updatedTableNames), 
+          jsonEncode(updatedSchemas),
+          jsonEncode(updatedTableNames),
           sampleData: sampleData,
           contextAnalysis: contextAnalysis,
         );
 
-        final cleanedSqlQuery = sqlQuery.replaceAll('sql', ' ').replaceAll(RegExp(r'\s+'), ' ')
-                                    .replaceAll(RegExp(r'\n'), ' ').replaceAll('```', '')
-                                    .replaceAll(RegExp(r'^\s*SELECT', caseSensitive: false), 'SELECT').trim();
+        final cleanedSqlQuery =
+            sqlQuery
+                .replaceAll('sql', ' ')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .replaceAll(RegExp(r'\n'), ' ')
+                .replaceAll('```', '')
+                .replaceAll(
+                  RegExp(r'^\s*SELECT', caseSensitive: false),
+                  'SELECT',
+                )
+                .trim();
         log('Executing SQL query from Gemini: $cleanedSqlQuery');
 
         if (mounted) {
-          setState(() { _currentExecutingQuery = cleanedSqlQuery; });
+          setState(() {
+            _currentExecutingQuery = cleanedSqlQuery;
+          });
         }
 
-        final results = await widget.bigQueryService.executeQuery(cleanedSqlQuery);
-        log('Query Results from BQ: ${results.length} rows.'); // Evita di loggare tutti i risultati se grandi
+        final results = await widget.bigQueryService.executeQuery(
+          cleanedSqlQuery,
+        );
+        log(
+          'Query Results from BQ: ${results.length} rows.',
+        ); // Evita di loggare tutti i risultati se grandi
 
         if (mounted) {
-          setState(() { _currentExecutingQuery = 'Analyzing query results...'; });
+          setState(() {
+            _currentExecutingQuery = 'Analyzing query results...';
+          });
         }
 
-        final analysis = await widget.geminiService.analyzeQueryResults(cleanedSqlQuery, results);
+        final analysis = await widget.geminiService.analyzeQueryResults(
+          cleanedSqlQuery,
+          results,
+        );
 
         if (!mounted) return;
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (context) => ResultPage(
-            question: question, sqlQuery: cleanedSqlQuery, results: results, analysis: analysis,
-          )),
+          MaterialPageRoute(
+            builder:
+                (context) => ResultPage(
+                  question: question,
+                  sqlQuery: cleanedSqlQuery,
+                  results: results,
+                  analysis: analysis,
+                ),
+          ),
         );
       }
     } catch (e, stackTrace) {
-      log('Error processing question: ${e.toString()}', error: e, stackTrace: stackTrace);
+      log(
+        'Error processing question: ${e.toString()}',
+        error: e,
+        stackTrace: stackTrace,
+      );
       if (mounted) {
         setState(() {
           _errorMessage = e.toString().replaceFirst('Exception: ', '');
@@ -483,14 +571,16 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _buildProcessingDialog(BuildContext context) {
     // Controlla se ci sono file esistenti in Silver da usare per abilitare lo skip
-    final hasExistingSilverData = _filesToProcess.length > 1 || 
-                  widget.geminiService.getLastContextAnalysis()?.containsKey('relevant_tables') == true;
-    
+    final hasExistingSilverData =
+        _filesToProcess.length > 1 ||
+        widget.geminiService.getLastContextAnalysis()?.containsKey(
+              'relevant_tables',
+            ) ==
+            true;
+
     return AlertDialog(
       backgroundColor: const Color.fromARGB(255, 30, 30, 30),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: Row(
         children: [
           const Icon(Icons.sync, color: Colors.blue),
@@ -517,17 +607,17 @@ class _SearchPageState extends State<SearchPage> {
               height: 200,
               child: ListView.builder(
                 // Forziamo un rebuild completo ad ogni cambiamento di stato
-                key: ValueKey(DateTime.now().millisecondsSinceEpoch), 
+                key: ValueKey(DateTime.now().millisecondsSinceEpoch),
                 shrinkWrap: true,
                 itemCount: _filesToProcess.length,
                 itemBuilder: (context, index) {
                   final file = _filesToProcess[index];
                   final status = file['status'];
-                  
+
                   // Estrai il nome del file dal percorso
                   final filePath = file['path'];
                   final fileName = filePath.split('/').last;
-                  
+
                   // Determina l'icona e il colore in base allo stato attuale
                   Widget leadingWidget;
                   if (status == 'processing') {
@@ -536,34 +626,46 @@ class _SearchPageState extends State<SearchPage> {
                       width: 24,
                       child: CircularProgressIndicator(
                         strokeWidth: 2.0,
-                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          Colors.blue,
+                        ),
                       ),
                     );
                   } else if (status == 'success') {
-                    leadingWidget = const Icon(Icons.check_circle, color: Colors.green);
+                    leadingWidget = const Icon(
+                      Icons.check_circle,
+                      color: Colors.green,
+                    );
                   } else if (status == 'error') {
                     leadingWidget = const Icon(Icons.error, color: Colors.red);
                   } else {
-                    leadingWidget = const Icon(Icons.circle_outlined, color: Colors.grey);
+                    leadingWidget = const Icon(
+                      Icons.circle_outlined,
+                      color: Colors.grey,
+                    );
                   }
-                  
+
                   return ListTile(
                     leading: leadingWidget,
                     title: Text(
                       fileName,
                       style: const TextStyle(color: Colors.white),
                     ),
-                    subtitle: file['message'].isNotEmpty
-                      ? Text(
-                          file['message'],
-                          style: const TextStyle(color: Colors.white70, fontSize: 12),
-                        )
-                      : null,
+                    subtitle:
+                        file['message'].isNotEmpty
+                            ? Text(
+                              file['message'],
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            )
+                            : null,
                   );
                 },
               ),
             ),
-            
+
             // Stato della scansione Dataplex
             if (_dataplexScanInProgress)
               Padding(
@@ -588,12 +690,15 @@ class _SearchPageState extends State<SearchPage> {
                   ],
                 ),
               ),
-            
+
             // Informazioni di elaborazione
             const SizedBox(height: 16),
             const Text(
               'Le tabelle saranno disponibili al completamento della scansione Dataplex.',
-              style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic),
+              style: TextStyle(
+                color: Colors.white70,
+                fontStyle: FontStyle.italic,
+              ),
             ),
             const SizedBox(height: 8),
             const Text(
@@ -615,20 +720,22 @@ class _SearchPageState extends State<SearchPage> {
                   _skipRequested = true;
                 });
               }
-              
+
               // Informiamo l'utente che stiamo procedendo solo con i dati Silver già disponibili
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('Procedendo solo con i dati Silver già disponibili, ignorando i nuovi file.'),
+                  content: Text(
+                    'Procedendo solo con i dati Silver già disponibili, ignorando i nuovi file.',
+                  ),
                   duration: Duration(seconds: 5),
                 ),
               );
-              
+
               // Chiudiamo il dialogo immediatamente
               Navigator.of(context).pop();
             },
           ),
-        
+
         // Aggiungi un pulsante per informare l'utente che deve aspettare
         TextButton(
           style: TextButton.styleFrom(foregroundColor: Colors.white),
@@ -637,24 +744,35 @@ class _SearchPageState extends State<SearchPage> {
             // Mostra un avviso all'utente
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text('Attendi il completamento dell\'elaborazione prima di procedere.'),
+                content: Text(
+                  'Attendi il completamento dell\'elaborazione prima di procedere.',
+                ),
                 duration: Duration(seconds: 3),
               ),
             );
-            
+
             // Chiudi il dialogo solo se tutti i file sono stati processati
-            bool allProcessed = !_filesToProcess.any((file) => 
-              file['status'] == 'pending' || file['status'] == 'processing');
-            
+            bool allProcessed =
+                !_filesToProcess.any(
+                  (file) =>
+                      file['status'] == 'pending' ||
+                      file['status'] == 'processing',
+                );
+
             if (allProcessed && !_dataplexScanInProgress) {
               Navigator.of(context).pop();
-              
+
               // Se ci sono file trasformati, mostra anche il dialogo di stato Dataplex
-              List<String> transformedFiles = _filesToProcess
-                  .where((file) => file['status'] == 'success' && file['silver_path'] != null)
-                  .map((file) => file['silver_path'] as String)
-                  .toList();
-              
+              List<String> transformedFiles =
+                  _filesToProcess
+                      .where(
+                        (file) =>
+                            file['status'] == 'success' &&
+                            file['silver_path'] != null,
+                      )
+                      .map((file) => file['silver_path'] as String)
+                      .toList();
+
               if (transformedFiles.isNotEmpty) {
                 _showDataplexStatusDialog(transformedFiles);
               }
@@ -664,11 +782,11 @@ class _SearchPageState extends State<SearchPage> {
       ],
     );
   }
-  
+
   // Nuovo metodo per mostrare un dialogo sullo stato di Dataplex
   void _showDataplexStatusDialog(List<String> transformedFiles) {
     if (!mounted) return;
-    
+
     showDialog(
       context: context,
       barrierDismissible: true,
@@ -718,7 +836,10 @@ class _SearchPageState extends State<SearchPage> {
                       final fileName = filePath.split('/').last;
                       return Text(
                         fileName,
-                        style: const TextStyle(color: Colors.green, fontSize: 12),
+                        style: const TextStyle(
+                          color: Colors.green,
+                          fontSize: 12,
+                        ),
                       );
                     },
                   ),
@@ -726,7 +847,10 @@ class _SearchPageState extends State<SearchPage> {
                 const SizedBox(height: 16),
                 const Text(
                   'Per includere questi dati nei risultati, attendi fino a 10-15 minuti e riformula la tua domanda.',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 const Text(
@@ -747,18 +871,25 @@ class _SearchPageState extends State<SearchPage> {
       },
     );
   }
-  
+
   // Nuovo metodo per mostrare un dialogo con i file già elaborati
-  void _showAlreadyProcessedFilesDialog(List<Map<String, dynamic>> processedFiles) {
+  void _showAlreadyProcessedFilesDialog(
+    List<Map<String, dynamic>> processedFiles,
+  ) {
     if (!mounted) return;
-    
+
     showDialog(
       context: context,
       barrierDismissible: true,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
           title: Text('Analisi del contesto'),
-          contentPadding: EdgeInsets.fromLTRB(24, 20, 24, 0), // Rimuovi padding in basso
+          contentPadding: EdgeInsets.fromLTRB(
+            24,
+            20,
+            24,
+            0,
+          ), // Rimuovi padding in basso
           content: Container(
             width: MediaQuery.of(context).size.width * 0.7,
             constraints: BoxConstraints(
@@ -773,14 +904,19 @@ class _SearchPageState extends State<SearchPage> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('File già elaborati:', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        'File già elaborati:',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
                       SizedBox(height: 8),
                       Container(
                         padding: EdgeInsets.all(8),
                         decoration: BoxDecoration(
                           color: Colors.green.withOpacity(0.1),
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.green.withOpacity(0.3)),
+                          border: Border.all(
+                            color: Colors.green.withOpacity(0.3),
+                          ),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -790,16 +926,30 @@ class _SearchPageState extends State<SearchPage> {
                                 padding: const EdgeInsets.only(bottom: 4.0),
                                 child: Row(
                                   children: [
-                                    Icon(Icons.check_circle, color: Colors.green, size: 16),
+                                    Icon(
+                                      Icons.check_circle,
+                                      color: Colors.green,
+                                      size: 16,
+                                    ),
                                     SizedBox(width: 8),
                                     Expanded(
                                       child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
                                         children: [
-                                          Text('File: ${fileInfo['file']}', 
-                                              style: TextStyle(fontWeight: FontWeight.w500)),
-                                          Text('Tabella: ${fileInfo['silver_table']}',
-                                              style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+                                          Text(
+                                            'File: ${fileInfo['file']}',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          Text(
+                                            'Tabella: ${fileInfo['silver_table']}',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color: Colors.grey[700],
+                                            ),
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -812,74 +962,90 @@ class _SearchPageState extends State<SearchPage> {
                       SizedBox(height: 16),
                     ],
                   ),
-                
+
                 // Informazioni sui file da elaborare
-                Text('File da elaborare:', 
-                    style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  'File da elaborare:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 SizedBox(height: 8),
                 Flexible(
                   child: SingleChildScrollView(
-                    child: (processedFiles.isNotEmpty)
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (final file in processedFiles)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 4.0),
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.file_present, color: Colors.blue, size: 16),
-                                      SizedBox(width: 8),
-                                      Expanded(child: Text(file.toString())),
-                                    ],
+                    child:
+                        (processedFiles.isNotEmpty)
+                            ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                for (final file in processedFiles)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 4.0),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.file_present,
+                                          color: Colors.blue,
+                                          size: 16,
+                                        ),
+                                        SizedBox(width: 8),
+                                        Expanded(child: Text(file.toString())),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                            ],
-                          )
-                        : Container(
-                            padding: EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.blue.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
+                              ],
+                            )
+                            : Container(
+                              padding: EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text('Nessun file da elaborare'),
                             ),
-                            child: Text('Nessun file da elaborare'),
-                          ),
                   ),
                 ),
-                
+
                 SizedBox(height: 16),
-                
+
                 // Informazioni sulle tabelle rilevanti
-                Text('Tabelle rilevanti per la query:', 
-                    style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  'Tabelle rilevanti per la query:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 SizedBox(height: 8),
                 Expanded(
                   child: SingleChildScrollView(
-                    child: (processedFiles.isNotEmpty)
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (final table in processedFiles)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 4.0),
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.table_chart, color: Colors.purple, size: 16),
-                                      SizedBox(width: 8),
-                                      Expanded(child: Text(table.toString())),
-                                    ],
+                    child:
+                        (processedFiles.isNotEmpty)
+                            ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                for (final table in processedFiles)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 4.0),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.table_chart,
+                                          color: Colors.purple,
+                                          size: 16,
+                                        ),
+                                        SizedBox(width: 8),
+                                        Expanded(child: Text(table.toString())),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                            ],
-                          )
-                        : Container(
-                            padding: EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.purple.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
+                              ],
+                            )
+                            : Container(
+                              padding: EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.purple.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                'Nessuna tabella rilevante identificata',
+                              ),
                             ),
-                            child: Text('Nessuna tabella rilevante identificata'),
-                          ),
                   ),
                 ),
               ],
@@ -1805,5 +1971,4 @@ class _SearchPageState extends State<SearchPage> {
       ),
     );
   }
-
 }
