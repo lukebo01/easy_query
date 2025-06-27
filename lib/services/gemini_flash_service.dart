@@ -5,8 +5,8 @@ import 'package:easy_query/services/rest_service.dart';
 class GeminiFlashService {
   final RestService restService;
   final String apiKey;
-  // Proprietà per memorizzare l'ultima analisi di contesto
-  Map<String, dynamic>? _lastContextAnalysis;
+
+  /// Crea un'istanza del servizio Gemini Flash
   GeminiFlashService({required this.restService, required this.apiKey});
 
   /// Genera una risposta di testo generica con Gemini
@@ -100,6 +100,8 @@ class GeminiFlashService {
         topK: 40,
       );
 
+      dev.log('User intent analysis: $response');
+
       return response;
     } catch (e) {
       dev.log('Error analyzing user intent: $e', error: e);
@@ -108,7 +110,7 @@ class GeminiFlashService {
   }
 
   /// Suggest bronze files based on user intent and metadata
-  Future<Map<String, dynamic>> suggestBronzeFiles(
+  Future<List<String>> suggestBronzeFiles(
     String userIntent,
     List<Map<String, dynamic>> bronzeMetadata,
   ) async {
@@ -122,8 +124,8 @@ class GeminiFlashService {
       Prima di consigliare un file valuta se i dati sono aggiornati e se contengono informazioni
       in linea con gli intenti della richiesta, se i metadati mostrano che il file è stato già trasformato allora NON includerlo.
 
-      Rispondi solo con un output strutturato contenente i nomi (completi di percorso) dei file bronze suggeriti nella forma: 
-      suggested_files:['path/to/file1','path/to/file2', ...]
+      Rispondi solo con un output strutturato JSON contenente i nomi (completi di percorso) dei file bronze suggeriti nella forma: 
+      {"suggested_files":["path/to/file1","path/to/file2"]}
 
       User Intent: $userIntent
 
@@ -138,7 +140,30 @@ class GeminiFlashService {
         topK: 50,
       );
 
-      return response;
+      // Clean the response from markdown formatting
+      String cleanedResponse = response.trim();
+      if (cleanedResponse.startsWith('```json')) {
+        cleanedResponse = cleanedResponse.substring(7);
+      }
+      if (cleanedResponse.endsWith('```')) {
+        cleanedResponse = cleanedResponse.substring(
+          0,
+          cleanedResponse.length - 3,
+        );
+      }
+      cleanedResponse = cleanedResponse.trim();
+
+      // Parse the JSON response
+      final Map<String, dynamic> parsedResponse = jsonDecode(cleanedResponse);
+
+      // Extract the list and convert to List<String>
+      final List<String> suggestedFiles =
+          (parsedResponse['suggested_files'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+
+      return suggestedFiles;
     } catch (e) {
       dev.log('Error suggesting bronze files: $e', error: e);
       throw Exception('Failed to suggest bronze files: $e');
@@ -146,7 +171,7 @@ class GeminiFlashService {
   }
 
   /// Suggest gold and silver schemas based on user intent and existing schemas
-  Future<List<Map<String, dynamic>>> goldAndSilverDiscovery(
+  Future<Map<String, List<String>>> goldAndSilverDiscovery(
     String userIntent,
     List<Map<String, dynamic>> goldAndSilverSchemas,
     Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
@@ -162,8 +187,7 @@ class GeminiFlashService {
 
       Rispondi solo con un output strutturato contenente i nomi delle tabelle suggerite nella forma:
 
-      output: {suggested_silver_tables:['table1','table2', ...]
-               , suggested_gold_tables:['table1','table2', ...]}
+      {"suggested_silver_tables":["table1","table2"],"suggested_gold_tables":["table1","table2"]}
 
       User Intent: $userIntent
 
@@ -180,7 +204,39 @@ class GeminiFlashService {
         topK: 50,
       );
 
-      return response;
+      // Clean the response from markdown formatting
+      String cleanedResponse = response.trim();
+      if (cleanedResponse.startsWith('```json')) {
+        cleanedResponse = cleanedResponse.substring(7);
+      }
+      if (cleanedResponse.endsWith('```')) {
+        cleanedResponse = cleanedResponse.substring(
+          0,
+          cleanedResponse.length - 3,
+        );
+      }
+      cleanedResponse = cleanedResponse.trim();
+
+      // Parse the JSON response
+      final Map<String, dynamic> parsedResponse = jsonDecode(cleanedResponse);
+
+      // Extract the lists and convert to List<String>
+      final List<String> suggestedSilverTables =
+          (parsedResponse['suggested_silver_tables'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+
+      final List<String> suggestedGoldTables =
+          (parsedResponse['suggested_gold_tables'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+
+      return {
+        'suggested_silver_tables': suggestedSilverTables,
+        'suggested_gold_tables': suggestedGoldTables,
+      };
     } catch (e) {
       dev.log('Error retrieving gold and silver schemas: $e', error: e);
       throw Exception('Failed to suggest gold and silver schemas: $e');
@@ -198,15 +254,17 @@ class GeminiFlashService {
       Sei un architetto di dati. Ricevi gli intenti utente e una lista di tabelle Silver e Gold rilevanti con i loro schemi.
       Definisci un piano per una query SQL BigQuery: quali tabelle usare, join logici, filtri, e aggregazioni.
 
+      IMPORTANTE: Le tabelle hanno nomi completi nel formato 'progetto.dataset.tabella'. Fa riferimento a questi nomi esatti.
+
       Individua connessioni semantiche tra le colonne esaminando sia i nomi delle colonne che i valori effettivi dei dati.
 
       Considera il fuzzy matching tra valori simili in diverse tabelle (ad esempio, "Elettronica" in una tabella potrebbe corrispondere a "Dispositivi Elettronici" in un'altra).
 
-      Rispondi solo con una spiegazione chiara in linguaggio naturale.
+      Rispondi solo con una spiegazione chiara in linguaggio naturale che includa i nomi esatti delle tabelle da utilizzare.
 
       User Intent: $userIntent
 
-      Selected table Schemas: $selectedSchemas
+      Selected table Schemas (nomi completi delle tabelle): $selectedSchemas
       ''';
 
       // Get response from LLM
@@ -216,6 +274,8 @@ class GeminiFlashService {
         topP: 0.9,
         topK: 40,
       );
+
+      dev.log('Query plan: $response');
 
       return response;
     } catch (e) {
@@ -237,13 +297,18 @@ class GeminiFlashService {
       Il tuo compito è quello di soddisfare l'intento dell'utente costruendo una query BigQuery seguendo attentamente il piano
       che ti è stato fornito.
 
+      IMPORTANTE: Utilizza SOLO i nomi delle tabelle esatti forniti negli schemi. NON utilizzare nomi generici come 'your_project' o 'your_dataset'.
+      Ogni tabella negli schemi ha un nome completo nel formato 'progetto.dataset.tabella' - usa esattamente questi nomi.
+
+      Racchiudi tutti i nomi di tabelle e colonne tra backtick (``) per evitare conflitti con parole riservate.
+
       Rispondi solo con la query SQL senza spiegazioni.
 
       User Intent: $userIntent
 
       Planned Query: $plannedQuery
 
-      Selected table Schemas: $selectedSchemas
+      Selected table Schemas (usa esattamente questi nomi di tabelle): $selectedSchemas
       ''';
 
       // Get response from LLM
@@ -272,16 +337,22 @@ class GeminiFlashService {
       Sei un esperto di SQL e di BigQuery. Ricevi una query SQL e una serie di schemi di database.
 
       Il tuo compito è quello di validare e correggere la query rispetto agli schemi, verificando la 
-      presenza delle tabelle e colonne nello schema
+      presenza delle tabelle e colonne nello schema.
+
+      IMPORTANTE: 
+      1. Utilizza SOLO i nomi delle tabelle esatti forniti negli schemi
+      2. NON utilizzare nomi generici come 'your_project', 'your_dataset', ecc.
+      3. Ogni tabella negli schemi ha un nome completo nel formato 'progetto.dataset.tabella' - usa esattamente questi nomi
+      4. Racchiudi tutti i nomi di tabelle e colonne tra backtick (``)
 
       Sostituisci i nomi di tabelle e di colonne che non corrispondono a quelli a tua disposizione
-      con quelli più appropriati, lascia tutto il resto invariato.
+      con quelli più appropriati basandoti sugli schemi forniti. Lascia tutto il resto invariato.
 
       Rispondi soltanto con la query SQL corretta.
 
       SQL Query: $sqlQuery
 
-      Database Schema: $selectedDatabaseSchemas
+      Database Schema (usa esattamente questi nomi di tabelle): $selectedDatabaseSchemas
       ''';
 
       // Get response from LLM
@@ -309,9 +380,17 @@ class GeminiFlashService {
 
       Assicurati che la query sia conforme agli standard di BigQuery e che utilizzi le migliori pratiche.
 
-      Racchiudi ogni nome di tabella e colonna tra backtick (``) per evitare conflitti con parole chiave riservate.
+      IMPORTANTE:
+      1. Racchiudi ogni nome di tabella e colonna tra backtick (``) per evitare conflitti con parole chiave riservate
+      2. Formatta le date e i timestamp in modo appropriato e utilizza le funzioni corrette per la manipolazione dei testi
+      3. Per le conversioni di tipo, usa SAFE_CAST invece di CAST per evitare errori su valori non validi
+      4. Quando converti stringhe in numeri, aggiungi filtri per escludere valori NULL o non numerici
+      5. Usa REGEXP_CONTAINS per identificare valori numerici validi prima della conversione
+      6. Gestisci i valori misti (numerici e testuali) nelle colonne usando condizioni WHERE appropriate
 
-      Formatta le date e i timestamp in modo appropriato e utilizza le funzioni corrette per la manipolazione dei testi.
+      Esempio di conversione sicura:
+      SAFE_CAST(column AS INT64) invece di CAST(column AS INT64)
+      WHERE REGEXP_CONTAINS(column, r'^[0-9]+\$') per filtrare solo valori numerici
 
       Rispondi soltanto con la query SQL corretta.
 

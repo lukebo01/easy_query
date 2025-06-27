@@ -334,15 +334,9 @@ class DataOrchestrationService {
     List<String> finalTableNames = [];
 
     /* -- PROCESSO DI TRASFORMAZIONE -- */
-    // Ottieni i nomi dei file bronze da trasformare
-    Map<String, dynamic> suggestedFiles = await _geminiService
+    // Ottieni i nomi dei file bronze da trasformare (DA FARE ITERATIVAMENTE IN BATCH)
+    final List<String> filesToTransformBronze = await _geminiService
         .suggestBronzeFiles(userIntent, bronzeMetadata);
-
-    // Estrai i nomi dei file suggeriti da Gemini e trasformali in una lista
-    final List<dynamic>? suggestedFilesRaw =
-        suggestedFiles['suggested_files'] as List<dynamic>?;
-    final List<String> filesToTransformBronze =
-        suggestedFilesRaw?.map((e) => e.toString()).toList() ?? [];
 
     // Se ci sono file da trasformare, procedi con la trasformazione
     if (filesToTransformBronze.isNotEmpty) {
@@ -528,38 +522,72 @@ class DataOrchestrationService {
     }
 
     /* -- GOLD E SILVER DISCOVERY -- */
-    List<Map<String, dynamic>> goldAndSilverSuggestedTables =
-        await _geminiService.goldAndSilverDiscovery(
+    // Ottieni le tabelle e gli schemi Silver e Gold (DA FARE ITERATIVAMENTE IN BATCH)
+    final goldAndSilverSuggestedTables = await _geminiService
+        .goldAndSilverDiscovery(
           userIntent,
           goldAndSilverSchemas,
           goldAndSilverSamples,
         );
 
+    dev.log(
+      "Gemini gold ans silver suggestion result: ${jsonEncode(goldAndSilverSuggestedTables)}",
+    );
+
+    // Estrai gli schemi e i nomi della tabelle dalla scoperta di Gold e Silver
+    List<String> silverTableNames =
+        goldAndSilverSuggestedTables['suggested_silver_tables'] as List<String>;
+    List<String> goldTableNames =
+        goldAndSilverSuggestedTables['suggested_gold_tables'] as List<String>;
+
+    // Unisci i nomi delle tabelle Silver e Gold in un'unica lista
+    final allSuggestedTables = [...silverTableNames, ...goldTableNames];
+
+    dev.log(
+      "Gemini suggested ${silverTableNames.length} Silver tables and ${goldTableNames.length} Gold tables for further processing.",
+    );
+
     // Crea una mappa aggiornata delle tabelle da utilizzare che contiene le tabelle e gli schemi ottenuti dalla trasformazione
     // e quelli ottenuti dalla scoperta di Gold e Silver
     Map<String, dynamic> updatedSchemas = {};
 
-    for (var schema in finalSchemas) {
-      String tableId = schema['tableReference']['tableId'];
-      String datasetId = schema['tableReference']['datasetId'];
-      String projectId = schema['tableReference']['projectId'];
-      updatedSchemas[tableId] = {
-        'datasetId': datasetId,
-        'projectId': projectId,
-        'schema': schema['schema'],
-      };
-    }
+    // Ottieni gli schemi delle tabelle Silver e Gold suggerite e aggiungile alla mappa finale degli schemi
+    for (String tableFullName in allSuggestedTables) {
+      // Parse del nome completo: progetto.dataset.tabella
+      final parts = tableFullName.split('.');
+      if (parts.length >= 3) {
+        // Formato: progetto.dataset.tabella
+        String datasetName = parts[1]; // secondo elemento è il dataset
+        String tableName = parts[2]; // terzo elemento è il nome della tabella
 
-    // Occhio qui la mappa è generata da Gemini e non ha i campi richiesti DA FIXARE
-    for (var schema in goldAndSilverSuggestedTables) {
-      String tableId = schema['tableReference']['tableId'];
-      String datasetId = schema['tableReference']['datasetId'];
-      String projectId = schema['tableReference']['projectId'];
-      updatedSchemas[tableId] = {
-        'datasetId': datasetId,
-        'projectId': projectId,
-        'schema': schema['schema'],
-      };
+        try {
+          final schema = await _bigQueryService.getTableSchema(
+            datasetName,
+            tableName,
+          );
+          if (schema.isNotEmpty) {
+            // Aggiungi lo schema come valore e il nome della tabella come chiave
+            updatedSchemas[tableFullName] = jsonDecode(schema);
+            dev.log("Added schema for table: $datasetName.$tableName");
+          } else {
+            dev.log(
+              "Warning: Empty schema for table $datasetName.$tableName",
+              level: 900,
+            );
+          }
+        } catch (e) {
+          dev.log(
+            "Error fetching schema for $datasetName.$tableName: $e",
+            error: e,
+            level: 900,
+          );
+        }
+      } else {
+        dev.log(
+          "Warning: Invalid table name format '$tableFullName'. Expected format: project.dataset.table",
+          level: 900,
+        );
+      }
     }
 
     // Ritorna la mappa ottenuta
