@@ -296,7 +296,17 @@ class DataOrchestrationService {
           tableNameOnly = fullTableName.split('.').last;
         }
 
-        if (tables == null || !tables.contains(tableNameOnly)) {
+        bool found = false;
+        if (tables != null) {
+          for (var table in tables) {
+            if (table.toLowerCase() == tableNameOnly.toLowerCase()) {
+              found = true;
+              break;
+            }
+          }
+        }
+
+        if (!found) {
           allTablesFound = false;
           dev.log(
             "Tabella non trovata: $fullTableName (nome semplice: $tableNameOnly)",
@@ -375,29 +385,26 @@ class DataOrchestrationService {
             String silverFileNameNoExt = ''; // Per fallback
 
             // GESTIONE NOME TABELLA
+            // Dove viene aggiunto il nome della tabella BigQuery
             if (bigQueryTableName != null && bigQueryTableName.isNotEmpty) {
-              if (!finalTableNames.contains(bigQueryTableName)) {
-                // Aggiungi il nome della tabella BigQuery alla lista finale
-                finalTableNames.add(bigQueryTableName);
-                dev.log(
-                  "Added new Silver external table to context: $bigQueryTableName",
-                );
+              // Mantieni il formato completo project.dataset.table ma normalizza il nome della tabella
+              final parts = bigQueryTableName.split('.');
+              final normalizedTableName = "${parts[0]}.${parts[1]}.${parts[2].toLowerCase()}";
+              
+              if (!finalTableNames.contains(normalizedTableName)) {
+                finalTableNames.add(normalizedTableName);
+                dev.log("Added normalized Silver external table to context: $normalizedTableName");
               }
-              // Estrai tableId per rimozione schema
-              final tableNamePartsForId = bigQueryTableName.split('.');
-              silverFileNameNoExt = tableNamePartsForId.last;
+              silverFileNameNoExt = parts[2].toLowerCase(); // Nome della tabella in minuscolo
             } else {
               // Fallback per derivare il nome della tabella se non fornito
               try {
                 final uriParts = Uri.parse(silverPathUri).pathSegments;
                 if (uriParts.isNotEmpty) {
                   final silverFileNameWithExt = uriParts.last;
-                  silverFileNameNoExt = silverFileNameWithExt.replaceAll(
-                    '.parquet',
-                    '',
-                  );
+                  silverFileNameNoExt = silverFileNameWithExt.replaceAll('.parquet', '').toLowerCase();
                   const String silverDatasetIdFallback = "silver_zone";
-                  final String newSilverTableNameFallback =
+                  final String newSilverTableNameFallback = 
                       "${_bigQueryService.projectId}.$silverDatasetIdFallback.$silverFileNameNoExt";
                   if (!finalTableNames.contains(newSilverTableNameFallback)) {
                     // Aggiungi il nome della tabella di fallback alla lista finale

@@ -412,12 +412,36 @@ class GeminiFlashService {
     }
   }
 
+  // Aggiungi questa funzione nel GeminiFlashService
+List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> results) {
+  return results.map((row) {
+    final sanitizedRow = <String, dynamic>{};
+    row.forEach((key, value) {
+      if (value is double) {
+        if (value.isInfinite) {
+          // Converti infinito in stringa indicativa
+          sanitizedRow[key] = value.isNegative ? "-Infinity" : "Infinity";
+        } else if (value.isNaN) {
+          // Converti NaN in null o in un valore di placeholder
+          sanitizedRow[key] = null;
+        } else {
+          sanitizedRow[key] = value;
+        }
+      } else {
+        sanitizedRow[key] = value;
+      }
+    });
+    return sanitizedRow;
+  }).toList();
+}
+
   /* -- AI AGENT FOR QUERY ANALYSIS -- */
   /// Analyze query results to generate insights
   Future<String> analyzeQueryResults(
     String sqlQuery,
     List<Map<String, dynamic>> results,
   ) async {
+    var sanitizedResults = sanitizeQueryResults(results);
     try {
       // Build prompt for the LLM
       final prompt = '''
@@ -425,7 +449,7 @@ class GeminiFlashService {
       
       SQL Query: $sqlQuery
       
-      Results: ${jsonEncode(results)}
+      Results: ${jsonEncode(sanitizedResults)}
       
       Please provide a detailed analysis of these results, including:
       
