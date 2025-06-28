@@ -228,9 +228,18 @@ class _SearchPageState extends State<SearchPage> {
       }
 
       // Effettua l'analisi dei risultati ottenuti
+      // Crea un sottosample di results per non superare il limite di token
+      List<Map<String, dynamic>> sampledResults;
+      const int maxRows = 70; // Puoi regolare questo valore in base alle esigenze/token
+      if (results.length > maxRows) {
+        sampledResults = results.sublist(0, maxRows);
+      } else {
+        sampledResults = results;
+      }
+      
       final analysis = await widget.geminiService.analyzeQueryResults(
         cleanedSqlQuery,
-        results,
+        sampledResults,
       );
 
       if (!mounted) return;

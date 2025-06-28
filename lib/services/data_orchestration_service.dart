@@ -560,10 +560,8 @@ class DataOrchestrationService {
 
     // Ottieni gli schemi delle tabelle Silver e Gold suggerite e aggiungile alla mappa finale degli schemi
     for (String tableFullName in allSuggestedTables) {
-      // Parse del nome completo: progetto.dataset.tabella
       final parts = tableFullName.split('.');
       if (parts.length >= 3) {
-        // Formato: progetto.dataset.tabella
         String datasetName = parts[1]; // secondo elemento è il dataset
         String tableName = parts[2]; // terzo elemento è il nome della tabella
 
