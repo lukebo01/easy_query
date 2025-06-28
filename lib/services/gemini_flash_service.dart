@@ -5,7 +5,11 @@ import 'package:easy_query/services/rest_service.dart';
 class GeminiFlashService {
   final RestService restService;
   final String apiKey;
-
+  
+  // Costanti per i limiti di token
+  static const int MAX_TOKEN_LIMIT = 90000;  // Limite massimo approssimativo per Gemini 2.0 Flash
+  static const double TOKEN_CHAR_RATIO = 4.0; // Approssimativamente 4 caratteri per token
+  
   /// Crea un'istanza del servizio Gemini Flash
   GeminiFlashService({required this.restService, required this.apiKey});
 
@@ -171,6 +175,7 @@ class GeminiFlashService {
   }
 
   /// Suggest gold and silver schemas based on user intent and existing schemas
+    /// Suggest gold and silver schemas based on user intent and existing schemas
   Future<Map<String, List<String>>> goldAndSilverDiscovery(
     String userIntent,
     List<Map<String, dynamic>> goldAndSilverSchemas,
@@ -181,6 +186,12 @@ class GeminiFlashService {
       final prompt = '''
       Sei un esperto di Big Data e data lineage. Ti sono state suggerite delle tabelle (con schemas e prime ennuple) da valutare,
       il tuo compito è individuare quali tabelle sono utili per soddisfare gli intenti dell'utente.
+      
+      IMPORTANTE:
+      1. Dai massima priorità alle tabelle più recenti e appena create, in quanto molto probabilmente contengono i dati più rilevanti per la query dell'utente
+      2. Se un nome di tabella contiene parole chiave presenti nell'intento dell'utente, è altamente probabile che sia la tabella corretta da utilizzare
+      3. Non trascurare le tabelle Silver anche se possono esistere versioni Gold, valuta sempre prima il contenuto e la rilevanza
+      4. Se l'intento dell'utente menziona esplicitamente un file o un tipo di documento, cerca tabelle che contengano nomi simili
       
       Prima di suggerire una tabella Silver controlla se questa abbia versioni più recenti o versioni Gold,
       in quel caso preferisci le altre versioni.
@@ -540,5 +551,195 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
     }
 
     return '/'; // Default: root of the bucket
+  }
+
+  /// Stima il numero di token in un testo
+  int estimateTokenCount(String text) {
+    // Un'approssimazione molto semplificata: circa 4 caratteri per token
+    // Questa è una stima grezza e non tiene conto di tokenizzazione specifica
+    return (text.length / TOKEN_CHAR_RATIO).ceil();
+  }
+  
+  /// Verifica se un prompt supera il limite di token
+  bool exceedsTokenLimit(String prompt, {int maxTokens = MAX_TOKEN_LIMIT}) {
+    int estimatedTokens = estimateTokenCount(prompt);
+    return estimatedTokens > maxTokens;
+  }
+
+  /// Divide una lista di dati in batch più piccoli per evitare di superare i limiti di token
+  List<List<T>> createBatches<T>(List<T> items, int maxBatchSize) {
+    if (items.isEmpty) return [];
+    
+    List<List<T>> batches = [];
+    for (int i = 0; i < items.length; i += maxBatchSize) {
+      int end = (i + maxBatchSize < items.length) ? i + maxBatchSize : items.length;
+      batches.add(items.sublist(i, end));
+    }
+    return batches;
+  }
+
+  /// Versione a batch di suggestBronzeFiles
+  Future<List<String>> batchedSuggestBronzeFiles(
+    String userIntent,
+    List<Map<String, dynamic>> bronzeMetadata,
+  ) async {
+    // Se i metadati sono pochi, usa la funzione normale
+    final testPrompt = """
+      User Intent: $userIntent
+      Bronze Metadata: ${jsonEncode(bronzeMetadata)}
+    """;
+    
+    if (!exceedsTokenLimit(testPrompt)) {
+      return await suggestBronzeFiles(userIntent, bronzeMetadata);
+    }
+    
+    // Altrimenti, suddividi in batch
+    dev.log("Metadata too large, processing in batches");
+    final batches = createBatches(bronzeMetadata, 50); // Inizia con batch di 50 elementi
+    dev.log("Created ${batches.length} batches");
+    
+    Set<String> allSuggestedFiles = {};
+    
+    for (var batch in batches) {
+      try {
+        final batchResults = await suggestBronzeFiles(userIntent, batch);
+        allSuggestedFiles.addAll(batchResults);
+      } catch (e) {
+        dev.log("Error in batch processing: $e");
+        // Se un batch è ancora troppo grande, riduci ulteriormente
+        if (batch.length > 10) {
+          final smallerBatches = createBatches(batch, batch.length ~/ 2);
+          for (var smallerBatch in smallerBatches) {
+            try {
+              final results = await suggestBronzeFiles(userIntent, smallerBatch);
+              allSuggestedFiles.addAll(results);
+            } catch (e) {
+              dev.log("Error in smaller batch: $e");
+            }
+          }
+        }
+      }
+    }
+    
+    return allSuggestedFiles.toList();
+  }
+  
+  /// Versione a batch di goldAndSilverDiscovery
+  Future<Map<String, List<String>>> batchedGoldAndSilverDiscovery(
+    String userIntent,
+    List<Map<String, dynamic>> goldAndSilverSchemas,
+    Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
+  ) async {
+    // Verifica iniziale
+    final testPrompt = """
+      User Intent: $userIntent
+      Gold and Silver Schemas: ${jsonEncode(goldAndSilverSchemas)}
+      Gold and Silver Samples: ${jsonEncode(goldAndSilverSamples)}
+    """;
+    
+    if (!exceedsTokenLimit(testPrompt)) {
+      return await goldAndSilverDiscovery(userIntent, goldAndSilverSchemas, goldAndSilverSamples);
+    }
+    
+    dev.log("Schema and sample data too large, processing in batches");
+    
+    // Creiamo batch per gli schemi
+    final schemaBatches = createBatches(goldAndSilverSchemas, 10);
+    dev.log("Created ${schemaBatches.length} schema batches");
+    
+    Set<String> suggestedSilverTables = {};
+    Set<String> suggestedGoldTables = {};
+    
+    // Elabora ogni batch di schemi con un sottoinsieme di campioni relativi
+    for (var schemaBatch in schemaBatches) {
+      // Estrai solo i campioni pertinenti per questo batch di schemi
+      Map<String, List<Map<String, dynamic>>> relevantSamples = {};
+      for (var schema in schemaBatch) {
+        // Estrai il nome della tabella dallo schema
+        String? tableName;
+        if (schema['tableReference'] != null) {
+          var tableRef = schema['tableReference'];
+          tableName = '${tableRef['projectId']}.${tableRef['datasetId']}.${tableRef['tableId']}';
+        }
+        
+        if (tableName != null && goldAndSilverSamples.containsKey(tableName)) {
+          // Limita i campioni se sono troppi
+          var samples = goldAndSilverSamples[tableName]!
+              .map((sample) => sample as Map<String, dynamic>)
+              .toList();
+          relevantSamples[tableName] = samples.length > 5 ? samples.sublist(0, 5) : samples;
+        }
+      }
+      
+      try {
+        final batchResults = await goldAndSilverDiscovery(
+          userIntent, schemaBatch, relevantSamples);
+        
+        suggestedSilverTables.addAll(batchResults['suggested_silver_tables'] as List<String>);
+        suggestedGoldTables.addAll(batchResults['suggested_gold_tables'] as List<String>);
+      } catch (e) {
+        dev.log("Error in batch processing: $e");
+        // Se ancora troppo grande, prova con batch più piccoli
+        if (schemaBatch.length > 2) {
+          final smallerBatches = createBatches(schemaBatch, schemaBatch.length ~/ 2);
+          for (var smallerBatch in smallerBatches) {
+            try {
+              final results = await goldAndSilverDiscovery(
+                userIntent, smallerBatch, relevantSamples);
+              suggestedSilverTables.addAll(results['suggested_silver_tables'] as List<String>);
+              suggestedGoldTables.addAll(results['suggested_gold_tables'] as List<String>);
+            } catch (e) {
+              dev.log("Error in smaller batch: $e");
+            }
+          }
+        }
+      }
+    }
+    
+    return {
+      'suggested_silver_tables': suggestedSilverTables.toList(),
+      'suggested_gold_tables': suggestedGoldTables.toList(),
+    };
+  }
+  
+  /// Versione a batch di analyzeQueryResults
+  Future<String> batchedAnalyzeQueryResults(
+    String sqlQuery,
+    List<Map<String, dynamic>> results,
+  ) async {
+    // Sanitizza i risultati per evitare errori con valori non serializzabili
+    var sanitizedResults = sanitizeQueryResults(results);
+    
+    // Verifica se il prompt completo sta nei limiti
+    final testPrompt = """
+      SQL Query: $sqlQuery
+      Results: ${jsonEncode(sanitizedResults)}
+    """;
+    
+    if (!exceedsTokenLimit(testPrompt)) {
+      return await analyzeQueryResults(sqlQuery, sanitizedResults);
+    }
+    
+    dev.log("Query results too large, processing with sample");
+    
+    // Usa un campione dei risultati invece dell'intero set
+    const maxRows = 100;
+    List<Map<String, dynamic>> sampledResults;
+    
+    if (sanitizedResults.length > maxRows) {
+      // Prendi un campione rappresentativo: inizio, metà e fine
+      final startSample = sanitizedResults.take(maxRows ~/ 3).toList();
+      final midStart = sanitizedResults.length ~/ 2 - (maxRows ~/ 6);
+      final midSample = sanitizedResults.sublist(midStart, midStart + (maxRows ~/ 3));
+      final endSample = sanitizedResults.skip(sanitizedResults.length - (maxRows ~/ 3)).toList();
+      
+      sampledResults = [...startSample, ...midSample, ...endSample];
+    } else {
+      sampledResults = sanitizedResults;
+    }
+    
+    // Aggiungi metadati sul campionamento
+    final analysisWithSamplingNote = await analyzeQueryResults(sqlQuery, sampledResults);
+    return "Note: This analysis is based on a sample of ${sampledResults.length} rows from a total of ${results.length} rows.\n\n$analysisWithSamplingNote";
   }
 }

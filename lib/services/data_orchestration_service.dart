@@ -344,9 +344,9 @@ class DataOrchestrationService {
     List<String> finalTableNames = [];
 
     /* -- PROCESSO DI TRASFORMAZIONE -- */
-    // Ottieni i nomi dei file bronze da trasformare (DA FARE ITERATIVAMENTE IN BATCH)
+    // Ottieni i nomi dei file bronze da trasformare utilizzando la versione a batch
     final List<String> filesToTransformBronze = await _geminiService
-        .suggestBronzeFiles(userIntent, bronzeMetadata);
+        .batchedSuggestBronzeFiles(userIntent, bronzeMetadata);
 
     // Se ci sono file da trasformare, procedi con la trasformazione
     if (filesToTransformBronze.isNotEmpty) {
@@ -516,7 +516,37 @@ class DataOrchestrationService {
           dev.log(
             "Batch Dataplex scan triggered: ${jsonEncode(dataplexResult)}",
           );
-          // Non attendiamo il completamento qui - sarà asincrono
+
+          // AGGIUNGI QUI: Recupera gli schemi aggiornati delle tabelle appena create
+          for (String tableFullName in finalTableNames) {
+            final parts = tableFullName.split('.');
+            if (parts.length >= 3) {
+              String datasetName = parts[1]; // secondo elemento è il dataset
+              String tableName = parts[2]; // terzo elemento è il nome della tabella
+
+              try {
+                final schema = await _bigQueryService.getTableSchema(
+                  datasetName,
+                  tableName,
+                );
+                if (schema.isNotEmpty) {
+                  // Aggiungi lo schema come valore e il nome della tabella come chiave
+                  finalSchemas.removeWhere((s) => 
+                    s['tableReference']?['datasetId'] == datasetName && 
+                    s['tableReference']?['tableId'] == tableName);
+                  finalSchemas.add(jsonDecode(schema));
+                  dev.log("Schema aggiornato per tabella appena creata: $datasetName.$tableName");
+                }
+              } catch (e) {
+                dev.log(
+                  "Errore nel recupero dello schema per $datasetName.$tableName: $e",
+                  error: e,
+                  level: 900,
+                );
+              }
+            }
+          }
+
         } else {
           dev.log(
             "Failed to trigger batch Dataplex scan. Tables may not be immediately available.",
@@ -529,16 +559,16 @@ class DataOrchestrationService {
     }
 
     /* -- GOLD E SILVER DISCOVERY -- */
-    // Ottieni le tabelle e gli schemi Silver e Gold (DA FARE ITERATIVAMENTE IN BATCH)
+    // Ottieni le tabelle e gli schemi Silver e Gold usando la versione a batch
     final goldAndSilverSuggestedTables = await _geminiService
-        .goldAndSilverDiscovery(
+        .batchedGoldAndSilverDiscovery(
           userIntent,
           goldAndSilverSchemas,
           goldAndSilverSamples,
         );
 
     dev.log(
-      "Gemini gold ans silver suggestion result: ${jsonEncode(goldAndSilverSuggestedTables)}",
+      "Gemini gold and silver suggestion result: ${jsonEncode(goldAndSilverSuggestedTables)}",
     );
 
     // Estrai gli schemi e i nomi della tabelle dalla scoperta di Gold e Silver
@@ -546,6 +576,12 @@ class DataOrchestrationService {
         goldAndSilverSuggestedTables['suggested_silver_tables'] as List<String>;
     List<String> goldTableNames =
         goldAndSilverSuggestedTables['suggested_gold_tables'] as List<String>;
+
+    // AGGIUNGI QUI: Fallback se Gemini non suggerisce tabelle, usa le tabelle appena create
+    if (silverTableNames.isEmpty && goldTableNames.isEmpty && finalTableNames.isNotEmpty) {
+      dev.log("Gemini non ha suggerito tabelle, usando le tabelle appena create come fallback");
+      silverTableNames = finalTableNames;
+    }
 
     // Unisci i nomi delle tabelle Silver e Gold in un'unica lista
     final allSuggestedTables = [...silverTableNames, ...goldTableNames];

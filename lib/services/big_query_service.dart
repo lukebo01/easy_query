@@ -11,6 +11,11 @@ class BigQueryService {
   late BigqueryApi _bigQueryApi;
   late http.Client _client; // Store the client for reuse
   bool _isInitialized = false;
+  
+  // Impostazioni di sicurezza per le query
+  static const int DEFAULT_MAX_ROWS = 100; // Default limit for rows returned
+  static const int ABSOLUTE_MAX_ROWS = 400; // Hard safety limit
+  static const int DEFAULT_TIMEOUT_SECONDS = 60;
 
   BigQueryService({required this.projectId});
 
@@ -36,90 +41,114 @@ class BigQueryService {
     log('BigQuery service disposed');
   }
 
+  /// Modifica la query per aggiungere clausola LIMIT se necessario
+  String _ensureSafeQuery(String query, int maxRows) {
+    // Controlla se la query ha già una clausola LIMIT
+    final hasLimit = RegExp(r'\bLIMIT\s+\d+', caseSensitive: false).hasMatch(query);
+    
+    // Se non ha un LIMIT, aggiungilo
+    if (!hasLimit) {
+      // Rimuove eventuali caratteri di punteggiatura finali e aggiunge LIMIT
+      query = query.trimRight();
+      if (query.endsWith(';')) {
+        query = query.substring(0, query.length - 1);
+      }
+      query = '$query LIMIT $maxRows';
+    }
+    
+    return query;
+  }
+
   Future<List<Map<String, dynamic>>> executeQuery(
     String query, {
-    int timeout = 60,
+    int timeout = DEFAULT_TIMEOUT_SECONDS,
+    int maxRows = DEFAULT_MAX_ROWS,
+    bool enforceSafeLimit = true,
   }) async {
     if (!_isInitialized) {
       throw Exception('BigQuery service not initialized');
     }
 
     try {
+      // Assicurati che maxRows non superi il limite massimo assoluto
+      if (maxRows > ABSOLUTE_MAX_ROWS) {
+        log('Warning: Requested maxRows ($maxRows) exceeds safety limit. Using $ABSOLUTE_MAX_ROWS instead.');
+        maxRows = ABSOLUTE_MAX_ROWS;
+      }
+
+      // Aggiungi LIMIT se la query non ce l'ha già e enforceSafeLimit è true
+      final safeQuery = enforceSafeLimit ? _ensureSafeQuery(query, maxRows) : query;
+      
+      // Log query originale e modificata se diverse
+      if (query != safeQuery) {
+        log('Original query: $query');
+        log('Modified safe query: $safeQuery');
+      } else {
+        log('Executing BQ Query: $safeQuery');
+      }
+
       final queryRequest =
           QueryRequest()
-            ..query = query
+            ..query = safeQuery
             ..timeoutMs = timeout * 1000
-            ..useLegacySql = false;
+            ..useLegacySql = false
+            ..maxResults = maxRows; // Imposta anche il limite massimo di risultati
 
-      log('Executing BQ Query: $query');
       // Specify location if known, otherwise let API infer (might default to US)
-      // For queries, location is often less critical than for jobs
       final response = await _bigQueryApi.jobs.query(queryRequest, projectId);
 
-      if (response.jobComplete == false) {
-        // Handle asynchronous query if needed (poll job status)
-        log(
-          'Warning: Query job did not complete immediately. Results might be partial or delayed.',
+      // Gestione delle query di grandi dimensioni con paginazione
+      List<Map<String, dynamic>> allRows = [];
+      var pageToken = response.pageToken;
+      
+      // Processa i risultati della prima pagina
+      allRows.addAll(_processQueryResultRows(response));
+      
+      // Se ci sono più pagine e non abbiamo ancora raggiunto maxRows, recuperale
+      int totalRowsProcessed = allRows.length;
+      int pageCount = 1;
+      
+      while (pageToken != null && totalRowsProcessed < maxRows) {
+        // Calcola quanti risultati ancora possiamo recuperare
+        int remainingRows = maxRows - totalRowsProcessed;
+        
+        log('Fetching next page of results (page ${pageCount + 1}), remaining rows: $remainingRows');
+        
+        final jobId = response.jobReference?.jobId;
+        final location = response.jobReference?.location;
+        
+        if (jobId == null) {
+          log('Warning: Could not get job ID for pagination');
+          break;
+        }
+        
+        // Recupera la pagina successiva
+        final pageResponse = await _bigQueryApi.jobs.getQueryResults(
+          projectId,
+          jobId,
+          maxResults: remainingRows,
+          pageToken: pageToken,
+          location: location,
         );
-        // You might want to implement polling here similar to the upload job
-      }
-
-      if (response.errors != null && response.errors!.isNotEmpty) {
-        final errorMessage = response.errors!
-            .map((e) => '${e.reason}: ${e.message}')
-            .join(', ');
-        log('BigQuery query error: $errorMessage');
-        // Throw a more specific error if possible
-        if (response.errors!.first.reason == 'invalidQuery') {
-          throw Exception('Invalid Query: $errorMessage');
-        }
-        throw Exception('Query error: $errorMessage');
-      }
-
-      final rows = <Map<String, dynamic>>[];
-      if (response.rows != null && response.schema?.fields != null) {
-        for (var row in response.rows!) {
-          final Map<String, dynamic> rowData = {};
-          if (row.f == null) continue; // Skip if row data is missing
-          for (var i = 0; i < response.schema!.fields!.length; i++) {
-            final field = response.schema!.fields![i];
-            // Ensure index is within bounds of row data
-            if (i < row.f!.length) {
-              final value = row.f![i].v;
-              // Basic type conversion (can be expanded)
-              if (value != null) {
-                if (field.type == 'INTEGER' || field.type == 'INT64') {
-                  rowData[field.name!] =
-                      int.tryParse(value.toString()) ?? value;
-                } else if (field.type == 'FLOAT' ||
-                    field.type == 'FLOAT64' ||
-                    field.type == 'NUMERIC' ||
-                    field.type == 'BIGNUMERIC') {
-                  rowData[field.name!] =
-                      double.tryParse(value.toString()) ?? value;
-                } else if (field.type == 'BOOLEAN' || field.type == 'BOOL') {
-                  rowData[field.name!] =
-                      value.toString().toLowerCase() == 'true';
-                } else {
-                  rowData[field.name!] =
-                      value; // Keep as string or original type
-                }
-              } else {
-                rowData[field.name!] = null;
-              }
-            } else {
-              rowData[field.name!] =
-                  null; // Handle cases where row has fewer fields than schema (shouldn't happen in valid response)
-              log(
-                'Warning: Row ${response.rows!.indexOf(row)} has fewer fields than schema expected.',
-              );
-            }
-          }
-          rows.add(rowData);
+        
+        // Processa i risultati
+        final pageRows = _processQueryResultRows(pageResponse);
+        allRows.addAll(pageRows);
+        totalRowsProcessed += pageRows.length;
+        pageCount++;
+        
+        // Aggiorna pageToken per la prossima iterazione
+        pageToken = pageResponse.pageToken;
+        
+        // Limite di sicurezza per il numero di pagine
+        if (pageCount > 10) {
+          log('Warning: Reached maximum page count (10). Some data may be truncated.');
+          break;
         }
       }
-      log('BQ Query successful, rows fetched: ${rows.length}');
-      return rows;
+
+      log('BQ Query successful, total rows fetched: ${allRows.length} in $pageCount pages');
+      return allRows;
     } catch (e) {
       log('Failed to execute BQ query: $e', error: e);
       // Rethrow with specific type if possible, otherwise generic Exception
@@ -131,6 +160,65 @@ class BigQueryService {
         throw Exception('Failed to execute query: $e');
       }
     }
+  }
+  
+  /// Processa le righe dei risultati della query da un oggetto QueryResponse o GetQueryResultsResponse
+  List<Map<String, dynamic>> _processQueryResultRows(dynamic response) {
+    if (response.errors != null && response.errors!.isNotEmpty) {
+      final errorMessage = response.errors!
+          .map((e) => '${e.reason}: ${e.message}')
+          .join(', ');
+      log('BigQuery query error: $errorMessage');
+      // Throw a more specific error if possible
+      if (response.errors!.first.reason == 'invalidQuery') {
+        throw Exception('Invalid Query: $errorMessage');
+      }
+      throw Exception('Query error: $errorMessage');
+    }
+
+    final rows = <Map<String, dynamic>>[];
+    if (response.rows != null && response.schema?.fields != null) {
+      for (var row in response.rows!) {
+        final Map<String, dynamic> rowData = {};
+        if (row.f == null) continue; // Skip if row data is missing
+        for (var i = 0; i < response.schema!.fields!.length; i++) {
+          final field = response.schema!.fields![i];
+          // Ensure index is within bounds of row data
+          if (i < row.f!.length) {
+            final value = row.f![i].v;
+            // Basic type conversion (can be expanded)
+            if (value != null) {
+              if (field.type == 'INTEGER' || field.type == 'INT64') {
+                rowData[field.name!] =
+                    int.tryParse(value.toString()) ?? value;
+              } else if (field.type == 'FLOAT' ||
+                  field.type == 'FLOAT64' ||
+                  field.type == 'NUMERIC' ||
+                  field.type == 'BIGNUMERIC') {
+                rowData[field.name!] =
+                    double.tryParse(value.toString()) ?? value;
+              } else if (field.type == 'BOOLEAN' || field.type == 'BOOL') {
+                rowData[field.name!] =
+                    value.toString().toLowerCase() == 'true';
+              } else {
+                rowData[field.name!] =
+                    value; // Keep as string or original type
+              }
+            } else {
+              rowData[field.name!] = null;
+            }
+          } else {
+            rowData[field.name!] =
+                null; // Handle cases where row has fewer fields than schema (shouldn't happen in valid response)
+            log(
+              'Warning: Row ${response.rows!.indexOf(row)} has fewer fields than schema expected.',
+            );
+          }
+        }
+        rows.add(rowData);
+      }
+    }
+    return rows;
   }
 
   Future<List<Map<String, dynamic>>> getBronzeMetadata() async {
