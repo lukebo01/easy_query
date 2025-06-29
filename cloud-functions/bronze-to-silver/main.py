@@ -549,9 +549,16 @@ def _process_parquet_file(file_path):
 
 def _process_excel_file(file_path):
     """Elabora un file Excel."""
-    df = pd.read_excel(file_path, engine=None)
-    df["deep_processed_ok"] = True
-    return df
+    try:
+        df = pd.read_excel(file_path, engine='openpyxl')  # Usa 'openpyxl' esplicitamente
+        df["deep_processed_ok"] = True
+        return df
+    except ImportError as e:
+        print(f"Errore: la libreria openpyxl non è installata.  Installa con 'pip install openpyxl'. Dettagli: {e}")
+        return pd.DataFrame([{"deep_processed_ok": False, "error": "openpyxl not installed"}])
+    except Exception as e:
+        print(f"Errore durante l'elaborazione del file Excel: {e}")
+        return pd.DataFrame([{"deep_processed_ok": False, "error": str(e)}])
 
 # -- METODO DI FALLBACK --
 

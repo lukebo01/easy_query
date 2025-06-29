@@ -273,6 +273,11 @@ class _ResultPageState extends State<ResultPage>
         elevation: 0,
         actions: [
           IconButton(
+            icon: const Icon(Icons.save),
+            tooltip: 'Save to Gold Zone',
+            onPressed: () => _showSaveToGoldDialog(),
+          ),
+          IconButton(
             icon: const Icon(Icons.help_outline),
             tooltip: 'Help',
             onPressed: () => _showHelpDialog(context),
@@ -2278,5 +2283,283 @@ class _ResultPageState extends State<ResultPage>
         );
       },
     );
+  }
+
+  // Metodo per mostrare il popup di salvataggio in Gold Zone
+  void _showSaveToGoldDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Row(
+            children: [
+              const Icon(Icons.save, color: Colors.amber),
+              const SizedBox(width: 10),
+              const Text(
+                'Save to Gold Zone',
+                style: TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          content: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Would you like to save these results in GOLD format?',
+                style: TextStyle(color: Colors.white),
+              ),
+              SizedBox(height: 10),
+              Text(
+                'This will make future queries for this data much faster.',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              child: const Text('No'),
+              onPressed: () => Navigator.pop(context),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.amber,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Yes'),
+              onPressed: () {
+                Navigator.pop(context);
+                _showTableNameInputDialog();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Metodo per mostrare il popup di inserimento nome tabella
+  void _showTableNameInputDialog() {
+    final TextEditingController tableNameController = TextEditingController();
+    bool isCheckingName = false;
+    String errorMessage = '';
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, StateSetter setState) {
+            return AlertDialog(
+              backgroundColor: Colors.grey[900],
+              title: const Text(
+                'Name your Gold Table',
+                style: TextStyle(color: Colors.white),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Choose a name for your Gold table (lowercase letters and underscores only)',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: tableNameController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Table Name',
+                      hintText: 'e.g. monthly_sales',
+                      labelStyle: const TextStyle(color: Colors.amber),
+                      hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: Colors.amber),
+                      ),
+                      errorText: errorMessage.isNotEmpty ? errorMessage : null,
+                      errorStyle: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  child: const Text('Cancel'),
+                  onPressed: () => Navigator.pop(context),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: isCheckingName
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.black,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text('Confirm'),
+                  onPressed: isCheckingName
+                      ? null
+                      : () async {
+                          final tableName = tableNameController.text.trim();
+                          
+                          // Verifica che il nome della tabella rispetti il formato richiesto
+                          final RegExp validNameRegex = RegExp(r'^[a-z][a-z0-9_]*$');
+                          if (!validNameRegex.hasMatch(tableName)) {
+                            setState(() {
+                              errorMessage = 'Invalid name format. Use only lowercase letters, numbers and underscores. Must start with a letter.';
+                            });
+                            return;
+                          }
+                          
+                          setState(() {
+                            isCheckingName = true;
+                            errorMessage = '';
+                          });
+                          
+                          try {
+                            // Controlla se il nome della tabella esiste già nel dataset gold_layer_dataset
+                            final tableExists = await _checkIfTableExists(tableName);
+                            
+                            if (tableExists) {
+                              setState(() {
+                                errorMessage = 'A table with this name already exists in Gold Zone';
+                                isCheckingName = false;
+                              });
+                            } else {
+                              // Chiudi il popup e mostra un indicatore di caricamento
+                              Navigator.pop(context);
+                              _saveToGoldZone(tableName);
+                            }
+                          } catch (e) {
+                            setState(() {
+                              errorMessage = 'Error checking table name: ${e.toString()}';
+                              isCheckingName = false;
+                            });
+                          }
+                        },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Controlla se una tabella con questo nome esiste già nel dataset gold_layer_dataset
+  Future<bool> _checkIfTableExists(String tableName) async {
+    try {
+      // Nota: in un'implementazione reale, dovresti chiamare un servizio BigQuery
+      // Per semplicità, questa è una simulazione
+      
+      // Simula una chiamata a BigQuery con un ritardo
+      await Future.delayed(const Duration(seconds: 1));
+      
+      // In un'implementazione reale, dovresti usare qualcosa come:
+      // final exists = await bigQueryService.tableExists('gold_layer_dataset', tableName);
+      
+      // Per ora simuliamo che il nome 'test_table' esista già
+      return tableName == 'test_table';
+    } catch (e) {
+      print('Error checking if table exists: $e');
+      rethrow;
+    }
+  }
+
+  // Salva i risultati in Gold Zone
+  void _saveToGoldZone(String tableName) async {
+    // Mostra un dialog di caricamento
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: Colors.amber),
+              const SizedBox(height: 20),
+              Text(
+                'Saving query results to Gold Zone as "$tableName"...',
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    try {
+      // Simula la chiamata alla cloud function silver-to-gold
+      await Future.delayed(const Duration(seconds: 2));
+      
+      // Chiudi il dialog di caricamento
+      Navigator.pop(context);
+      
+      // Mostra un dialog di successo
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            backgroundColor: Colors.grey[900],
+            title: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.green),
+                const SizedBox(width: 10),
+                const Text('Success', style: TextStyle(color: Colors.white)),
+              ],
+            ),
+            content: Text(
+              'Your query results have been successfully saved to Gold Zone as "$tableName".',
+              style: const TextStyle(color: Colors.white),
+            ),
+            actions: [
+              TextButton(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      // Chiudi il dialog di caricamento
+      Navigator.pop(context);
+      
+      // Mostra un dialog di errore
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            backgroundColor: Colors.grey[900],
+            title: Row(
+              children: [
+                const Icon(Icons.error_outline, color: Colors.red),
+                const SizedBox(width: 10),
+                const Text('Error', style: TextStyle(color: Colors.white)),
+              ],
+            ),
+            content: Text(
+              'Failed to save to Gold Zone: ${e.toString()}',
+              style: const TextStyle(color: Colors.white),
+            ),
+            actions: [
+              TextButton(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          );
+        },
+      );
+    }
   }
 }

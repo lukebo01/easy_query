@@ -28,3 +28,4 @@ google.api_core
 google-cloud-bigquery
 google-cloud-vision
 pymupdf
+openpyxl

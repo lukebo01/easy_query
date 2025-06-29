@@ -175,11 +175,11 @@ class GeminiFlashService {
   }
 
   /// Suggest gold and silver schemas based on user intent and existing schemas
-    /// Suggest gold and silver schemas based on user intent and existing schemas
   Future<Map<String, List<String>>> goldAndSilverDiscovery(
     String userIntent,
     List<Map<String, dynamic>> goldAndSilverSchemas,
     Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
+    {List<String> recentlyCreatedTables = const []}
   ) async {
     try {
       // Build prompt for the LLM
@@ -188,10 +188,13 @@ class GeminiFlashService {
       il tuo compito è individuare quali tabelle sono utili per soddisfare gli intenti dell'utente.
       
       IMPORTANTE:
-      1. Dai massima priorità alle tabelle più recenti e appena create, in quanto molto probabilmente contengono i dati più rilevanti per la query dell'utente
-      2. Se un nome di tabella contiene parole chiave presenti nell'intento dell'utente, è altamente probabile che sia la tabella corretta da utilizzare
-      3. Non trascurare le tabelle Silver anche se possono esistere versioni Gold, valuta sempre prima il contenuto e la rilevanza
-      4. Se l'intento dell'utente menziona esplicitamente un file o un tipo di documento, cerca tabelle che contengano nomi simili
+      ${recentlyCreatedTables.isNotEmpty ? '*** TABELLE RECENTEMENTE CREATE: ${recentlyCreatedTables.join(', ')} ***\nQueste tabelle sono state APPENA create dalla trasformazione bronze-to-silver e DEVONO ESSERE INCLUSE nella tua selezione finale.' : ''}
+      1. Se ci sono tabelle recentemente create dalla trasformazione bronze-to-silver, DEVI ASSOLUTAMENTE includerle nella tua selezione, anche se non sembrano perfettamente correlate all'intento dell'utente
+      2. Dai massima priorità alle tabelle più recenti e appena create, in quanto molto probabilmente contengono i dati più rilevanti per la query dell'utente
+      3. Se un nome di tabella contiene parole chiave presenti nell'intento dell'utente, è altamente probabile che sia la tabella corretta da utilizzare
+      4. Non trascurare le tabelle Silver anche se possono esistere versioni Gold, valuta sempre prima il contenuto e la rilevanza
+      5. Se l'intento dell'utente menziona esplicitamente un file o un tipo di documento, cerca tabelle che contengano nomi simili
+      6. Se hai da poco elaborato un file bronze in silver, quel file DEVE essere incluso nella query finale
       
       Prima di suggerire una tabella Silver controlla se questa abbia versioni più recenti o versioni Gold,
       in quel caso preferisci le altre versioni.
@@ -629,6 +632,7 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
     String userIntent,
     List<Map<String, dynamic>> goldAndSilverSchemas,
     Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
+    {List<String> recentlyCreatedTables = const []}
   ) async {
     // Verifica iniziale
     final testPrompt = """
@@ -638,7 +642,12 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
     """;
     
     if (!exceedsTokenLimit(testPrompt)) {
-      return await goldAndSilverDiscovery(userIntent, goldAndSilverSchemas, goldAndSilverSamples);
+      return await goldAndSilverDiscovery(
+        userIntent, 
+        goldAndSilverSchemas, 
+        goldAndSilverSamples,
+        recentlyCreatedTables: recentlyCreatedTables
+      );
     }
     
     dev.log("Schema and sample data too large, processing in batches");
@@ -673,7 +682,11 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
       
       try {
         final batchResults = await goldAndSilverDiscovery(
-          userIntent, schemaBatch, relevantSamples);
+          userIntent, 
+          schemaBatch, 
+          relevantSamples,
+          recentlyCreatedTables: recentlyCreatedTables
+        );
         
         suggestedSilverTables.addAll(batchResults['suggested_silver_tables'] as List<String>);
         suggestedGoldTables.addAll(batchResults['suggested_gold_tables'] as List<String>);
@@ -685,7 +698,11 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
           for (var smallerBatch in smallerBatches) {
             try {
               final results = await goldAndSilverDiscovery(
-                userIntent, smallerBatch, relevantSamples);
+                userIntent, 
+                smallerBatch, 
+                relevantSamples,
+                recentlyCreatedTables: recentlyCreatedTables
+              );
               suggestedSilverTables.addAll(results['suggested_silver_tables'] as List<String>);
               suggestedGoldTables.addAll(results['suggested_gold_tables'] as List<String>);
             } catch (e) {
