@@ -478,8 +478,10 @@ List<Map<String, dynamic>> sanitizeQueryResults(List<Map<String, dynamic>> resul
       // Get response from LLM
       final response = await generateText(prompt);
 
-      // Extract the path from the response
-      return _extractPathFromResponse(response);
+      print('Query analysis: $response');
+
+      // Return the complete analysis text instead of extracting a path
+      return response;
     } catch (e) {
       print('Error analyzing query results: $e');
       throw Exception('Failed to analyze query results: $e');
