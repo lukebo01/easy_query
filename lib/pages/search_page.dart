@@ -244,6 +244,7 @@ class _SearchPageState extends State<SearchPage> {
                 sqlQuery: cleanedSqlQuery,
                 results: results,
                 analysis: analysis,
+                bigQueryService: widget.bigQueryService,
               ),
         ),
       );

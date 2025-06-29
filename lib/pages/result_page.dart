@@ -12,12 +12,15 @@ import 'package:flutter/rendering.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:universal_html/html.dart' as webhtml;
+import 'package:easy_query/services/big_query_service.dart';
 
 class ResultPage extends StatefulWidget {
   final String question;
   final String sqlQuery;
   final List<Map<String, dynamic>> results;
   final String analysis;
+  // Aggiungiamo un campo per il servizio BigQuery
+  final BigQueryService bigQueryService;
 
   const ResultPage({
     super.key,
@@ -25,6 +28,7 @@ class ResultPage extends StatefulWidget {
     required this.sqlQuery,
     required this.results,
     required this.analysis,
+    required this.bigQueryService,
   });
 
   @override
@@ -2498,8 +2502,17 @@ class _ResultPageState extends State<ResultPage>
     );
 
     try {
-      // Simula la chiamata alla cloud function silver-to-gold
-      await Future.delayed(const Duration(seconds: 2));
+    
+      //qui invoco la funzione per salvare i risultati in Gold Zone
+      bool success = await widget.bigQueryService.saveResultsToGoldZone(
+        tableName,
+        widget.results,
+        widget.sqlQuery,
+      );
+
+      if (!success) {
+        throw Exception('Failed to save results to Gold Zone');
+      }
       
       // Chiudi il dialog di caricamento
       Navigator.pop(context);

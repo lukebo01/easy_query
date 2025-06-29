@@ -472,4 +472,56 @@ class BigQueryService {
       }
     }
   }
+
+  /// Salva i risultati di una query nella Gold Zone chiamando la cloud function silver-to-gold
+  /// 
+  /// Parametri:
+  /// - tableName: Nome della tabella Gold da creare
+  /// - results: Lista di mappe contenenti i risultati della query
+  /// - query: Query SQL originale utilizzata per generare i risultati
+  /// 
+  /// Returns: true se l'operazione va a buon fine, false altrimenti
+  Future<bool> saveResultsToGoldZone(
+    String tableName,
+    List<Map<String, dynamic>> results,
+    String query, {
+    String description = "Results saved from EasyQuery"
+  }) async {
+    try {
+      if (!_isInitialized) {
+        throw Exception('BigQuery service not initialized');
+      }
+
+      log('Saving results to Gold Zone as "$tableName"');
+      
+      // URL della cloud function silver-to-gold
+      final url = 'https://europe-central2-soy-transducer-456512-t0.cloudfunctions.net/silver-to-gold';
+      
+      // Corpo della richiesta secondo il formato atteso dalla cloud function
+      final requestBody = {
+        "query": query,
+        "output_name": tableName,
+        "description": description
+      };
+
+      // Esegui la chiamata HTTP
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(requestBody),
+      ).timeout(Duration(minutes: 2));
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final responseData = jsonDecode(response.body);
+        log('Successfully saved to Gold Zone: ${responseData['message']}');
+        return true;
+      } else {
+        log('Error saving to Gold Zone: ${response.statusCode} - ${response.body}');
+        return false;
+      }
+    } catch (e) {
+      log('Exception saving to Gold Zone: $e', error: e);
+      return false;
+    }
+  }
 }
