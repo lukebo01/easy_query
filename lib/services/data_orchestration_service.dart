@@ -336,8 +336,9 @@ class DataOrchestrationService {
     String userIntent,
     List<Map<String, dynamic>> goldAndSilverSchemas,
     Map<String, List<Map<String, dynamic>>> goldAndSilverSamples,
-    List<Map<String, dynamic>> bronzeMetadata,
-  ) async {
+    List<Map<String, dynamic>> bronzeMetadata, {
+    Function(int)? onBronzeFilesFound,
+  }) async {
     // Definizione di liste per memorizzare i risultati
     List<String> transformedSilverFileUris = [];
     List<Map<String, dynamic>> finalSchemas = [];
@@ -353,6 +354,11 @@ class DataOrchestrationService {
       dev.log(
         "Gemini suggested ${filesToTransformBronze.length} files for Bronze-to-Silver transformation",
       );
+
+      // Chiamiamo il callback se fornito per notificare l'UI che abbiamo trovato file Bronze
+      if (onBronzeFilesFound != null) {
+        onBronzeFilesFound(filesToTransformBronze.length);
+      }
 
       for (int i = 0; i < filesToTransformBronze.length; i++) {
         // Memorizza l'Uri del file corrente

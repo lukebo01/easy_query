@@ -180,11 +180,17 @@ class _SearchPageState extends State<SearchPage> {
       // Dai il via al processo di data transformation
       Map<String, dynamic> selectedAndUpdatedSchemasMap =
           await dataOrchestrationService.dataTransformationPipeline(
-            userIntent,
-            schemas,
-            sampleData,
-            cloudFilesMetadata,
-          );
+        userIntent,
+        schemas,
+        sampleData,
+        cloudFilesMetadata,
+        onBronzeFilesFound: (fileCount) {
+          // Questo callback viene eseguito quando vengono trovati file Bronze
+          if (mounted) {
+            _showBronzeTransformationDialog(fileCount);
+          }
+        },
+      );
 
       if (mounted) {
         setState(() {
@@ -938,6 +944,50 @@ class _SearchPageState extends State<SearchPage> {
               ],
             );
           },
+        );
+      },
+    );
+  }
+
+  // Aggiungi questo metodo per mostrare il popup quando vengono trovati file Bronze
+  void _showBronzeTransformationDialog(int fileCount) {
+    showDialog(
+      context: context,
+      barrierDismissible: false, // L'utente non può chiudere il dialog cliccando all'esterno
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Row(
+            children: [
+              const Icon(Icons.hourglass_top, color: Colors.orange),
+              const SizedBox(width: 10),
+              const Text('Processing New Data', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: Colors.orange),
+              const SizedBox(height: 16),
+              Text(
+                'We detected $fileCount new file(s) in the Bronze layer that need to be processed for your query.',
+                style: const TextStyle(color: Colors.white),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This may take a few minutes to complete. Your results will be displayed as soon as the processing is finished.',
+                style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              child: const Text('OK, I\'ll wait'),
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+              },
+            ),
+          ],
         );
       },
     );
