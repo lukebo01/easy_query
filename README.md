@@ -68,4 +68,4 @@ Contribuisci al progetto aprendo una pull request o segnalando problemi nella se
 
 ## Licenza
 
-Questo progetto è distribuito sotto la licenza MIT. Consulta il file [LICENSE](LICENSE) per maggiori dettagli.
+Questo progetto è distribuito sotto la licenza MIT.
